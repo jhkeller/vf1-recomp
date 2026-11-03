@@ -1128,6 +1128,58 @@ private:
 		bool spec_enable = false;
 	};
 
+	// Ray-traced lighting, phase 1 (src/machine/model1_rt.cpp): the 3D scene as the game built it,
+	// each quad in view space before it's culled, clipped, projected and flattened to one colour, so
+	// a renderer can light it again (shadows, reflections, bounced light). View space is the game's:
+	// x right, y up, z forward (into the screen). Only gathered while m_rt_capture is on; nothing
+	// here changes what the game or the arcade renderers draw.
+	enum rt_flag : uint8_t
+	{
+		RT_MOIRE = 1,    // one of the game's shadow polygons (a ray-traced picture leaves them out)
+		RT_STAGE = 2,    // from a stage's model (stage_model)
+		RT_CULLED = 4,   // facing away: not drawn by the game, but it casts shadows and shows in reflections
+		RT_UNLIT = 8,    // a flat UI element the game draws unlit
+		RT_TWO_SIDED = 16,   // never culled (the polygon's flags bit 14)
+		RT_RECOLOURED = 32,  // albedo is the game's final colour (random fighter, build effect); unset on culled ones (palette's)
+	};
+	struct rt_quad
+	{
+		float v[4][3];          // view space, in the game's winding (old_p1, old_p0, p0, p1)
+		float n[3];             // unit normal, view space
+		uint32_t albedo = 0;    // 0x00rrggbb: the polygon's colour unlit (fully lit, as the game's colour table has it)
+		uint32_t lit = 0;       // 0x00rrggbb: the colour the game drew it (0 for culled ones)
+		uint32_t obj = 0;       // its model's address (the polygons' list in ROM / RAM)
+		uint16_t view = 0;      // which rt_view it belongs to
+		uint8_t lightmode = 0;  // index into its view's light parameters (0x80 | n: the second bank)
+		uint8_t flags = 0;      // rt_flag
+	};
+	struct rt_view
+	{
+		float xc = 0, yc = 0, zoomx = 0, zoomy = 0, viewx = 0, viewy = 0, ext = 0, scale = 1;   // project_point's
+		int x1 = 0, y1 = 0, x2 = 0, y2 = 0;    // its clip, render pixels
+		float light[3] = {};                   // the light vector (unit, but Sarah's stage keeps its length)
+		bool spec_enable = false;
+		uint32_t first = 0, count = 0;         // its quads in rt_scene::quads
+	};
+	struct rt_scene
+	{
+		std::vector<rt_quad> quads;
+		std::vector<rt_view> views;
+		std::vector<lightparam_t> lightparams;   // 256, as the frame's views had them (the game sets them once a list)
+		uint64_t frame = 0;
+		double moment = 0;                       // smooth motion's moment drawn (m_draw_time)
+		void clear() { quads.clear(); views.clear(); }
+	};
+	bool m_rt_capture = false;
+	rt_scene m_rt_scene;
+	void rt_begin();
+	void rt_view_set();
+	void rt_end();
+	void rt_add(const point_t *a, const point_t *b, const point_t *c, const point_t *d, const glm::vec3 &n,
+		uint32_t albedo, uint32_t lit, uint32_t obj, int lightmode, uint8_t flags);
+	uint32_t rt_palette_colour(uint16_t tex_data) const;   // a culled polygon's albedo: its pen, no recolouring
+	void rt_dump(const char *dir) const;                   // the scene as Wavefront OBJ + MTL (VF_RT_DUMP)
+
 	class clipper_t
 	{
 	public:

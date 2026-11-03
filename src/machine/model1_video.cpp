@@ -1277,6 +1277,7 @@ void model1::push_object(uint32_t tex_adr, uint32_t poly_adr, uint32_t size, flo
 	static const bool stage_only = getenv("VF_STAGE_ONLY") != nullptr;   // TESTONLY (the stage alone: a still's background)
 	if (stage_only && !stage_model(poly_adr)) return;
 	dump_part(tex_adr, poly_adr, size);
+	const uint32_t rt_obj = poly_adr;   // (ray-traced lighting's capture: whose polygons, model1_rt.cpp)
 	// Protect against bad data when attacking a super destroyer
 	if(tex_adr == 0xffffffff || size >= 0x1000000)
 		return;
@@ -1544,12 +1545,21 @@ void model1::push_object(uint32_t tex_adr, uint32_t poly_adr, uint32_t size, flo
 #endif
 
 		quad_t cquad;
+		uint32_t rt_albedo = 0;   // (the capture's: its colour unlit, below)
 
 		if (!link)
 			goto next;
 
-		if (!(flags & 0x00004000) && view_determinant(old_p1, old_p0, p0) > 0)
+		if (!(flags & 0x00004000) && view_determinant(old_p1, old_p0, p0) > 0) {
+			// (facing away: the game leaves it out, a ray-traced picture keeps it for shadows and reflections,
+			// in its pen's colour (no recolouring: that has state the drawn polygons keep))
+			if (m_rt_capture && !built) {
+				const uint16_t td = m_tgp_ram[tex_adr - 0x40000];
+				rt_add(old_p1, old_p0, p0, p1, glm::normalize(vn), rt_palette_colour(td), 0, rt_obj, lightmode,
+					uint8_t(RT_CULLED | ((flags & 0x00002000) ? RT_MOIRE : 0) | (stage_model(rt_obj) ? RT_STAGE : 0) | ((td & 0x400) ? RT_UNLIT : 0)));
+			}
 			goto next;
+		}
 
 		vn = glm::normalize(vn);
 
@@ -1782,10 +1792,18 @@ void model1::push_object(uint32_t tex_adr, uint32_t poly_adr, uint32_t size, flo
 				cquad.col = c;
 			} else
 				cquad.col = colour_of(lumval);
+			if (m_rt_capture) rt_albedo = (tex_data & 0x400) ? cquad.col : colour_of(0xff);
 		}
 
 		if (flags & 0x00002000)
 			cquad.col |= MOIRE;
+		if (m_rt_capture) {
+			const uint16_t td = m_tgp_ram[tex_adr - 0x40000];
+			const bool recoloured = head_hue >= 0 || outfit >= 0 || skin_rec || chrome_lm >= 0 || build;
+			rt_add(old_p1, old_p0, p0, p1, vn, rt_albedo, cquad.col & 0xffffff, rt_obj, lightmode,
+				uint8_t(((flags & 0x00002000) ? RT_MOIRE : 0) | (stage_model(rt_obj) ? RT_STAGE : 0) | ((td & 0x400) ? RT_UNLIT : 0) |
+					((flags & 0x00004000) ? RT_TWO_SIDED : 0) | (recoloured ? RT_RECOLOURED : 0)));
+		}
 		if (fighters_only && (cquad.col & MOIRE)) goto next;   // (and no shadows; the strip's points still move on)
 
 		fclip_push_quad(0, cquad);
@@ -2212,6 +2230,7 @@ void model1::tgp_render(bitmap_rgb32 &bitmap, const rectangle &cliprect, render_
 
 		m_view->init_translation_matrix();
 		float old_z = 0;
+		if (pass == RENDER_BELOW_HUD && m_rt_capture) rt_begin();
 		m_head_seen.clear();
 		neck_settle();
 
@@ -2276,6 +2295,7 @@ void model1::tgp_render(bitmap_rgb32 &bitmap, const rectangle &cliprect, render_
 				float y1 = 383 - (readi16(list_offset + 14) - 39);
 
 				m_view->set_viewport(xc, yc, x1, x2, y1, y2);
+				if (pass == RENDER_BELOW_HUD && m_rt_capture) rt_view_set();
 
 				list_offset += 16;
 				break;
@@ -2375,6 +2395,7 @@ void model1::tgp_render(bitmap_rgb32 &bitmap, const rectangle &cliprect, render_
 		}
 	end:
 		draw_objects(bitmap, cliprect);
+		if (pass == RENDER_BELOW_HUD && m_rt_capture) rt_end();
 	}
 }
 
@@ -2513,6 +2534,8 @@ void model1::video_start()
 	m_clipfn[3].m_isclipped = &model1::fclip_isc_right;
 	m_clipfn[3].m_clip = &model1::fclip_clip_right;
 
+	// ray-traced lighting's scene capture (model1_rt.cpp): for now only for its dumps
+	m_rt_capture = getenv("VF_RT_CAPTURE") || getenv("VF_RT_DUMP");
 }
 
 // Snapshot the HUD after the cat1 tilemaps are composited: a pixel is a bright
