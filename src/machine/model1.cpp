@@ -3579,7 +3579,7 @@ void model1::screen_update(bitmap_rgb32 &bitmap, const rectangle &cliprect)
 		parallel_rows(bitmap.height(), [&](int a, int b) {
 			for (int y = a; y < b; y++) { uint32_t *p = &bitmap.pix(y); for (int x = 0; x < bitmap.width(); x++) p[x] |= UNDER_3D; }
 		});
-	const bool g3 = gpu3d_on() && !no_polys && !m_rt_mode;   // the 3D on the GPU (gpu3d_end), else the CPU's (or the ray-traced one's)
+	const bool g3 = gpu3d_on() && !no_polys && !rt_on();   // the 3D on the GPU (gpu3d_end), else the CPU's (or the ray-traced one's)
 	// A picture's painted sides stay over the 3D: what it draws beyond the arcade's 4:3 was off the
 	// cabinet's screen (a boss's empty select portrait, in Cheats' Akira's place, leaves its sky
 	// there). Put together on the GPU, the sides go on again above the 3D (above); else kept here.

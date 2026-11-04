@@ -8,6 +8,11 @@
 //  - shadows: a ray from each lit pixel toward the light, through a BVH of every polygon in its
 //    view, the ones the game culled too (they cast shadows); a pixel the ray finds blocked takes
 //    its colour in shadow (the light's direct part gone). The game's own shadow polygons are left out.
+//  - gi (global illumination): from points on a coarse grid over the picture (a few render pixels
+//    apart), rays over the hemisphere above the surface; what they hit sends back its colour as
+//    lit there (the game's ambient and diffuse, in shadow or not), and the rays that hit something
+//    near darken the ambient light (ambient occlusion). Kept from picture to picture where the same
+//    polygon is under a grid point (less noise), and spread over the pixels between, polygon by polygon.
 // The game's shadow polygons, when drawn, shade a pixel once, as model1::draw_hline_moired does.
 #pragma once
 #include "rt_scene.h"
@@ -27,6 +32,10 @@ struct target
 struct options
 {
 	bool shadows = false;        // ray-traced shadows
+	bool gi = false;             // ray-traced global illumination (one bounce) and ambient occlusion
+	int gi_rays = 6;             // rays a grid point a picture
+	float gi_strength = 0.6f;    // how much bounced light is added
+	float ao_strength = 0.6f;    // how far ambient occlusion darkens the ambient light (0 none, 1 fully)
 	bool game_shadows = true;    // the game's shadow polygons
 	bool blend_shadows = true;   // they halve the pixel beneath (above 1x); false: the arcade's checkerboard
 	uint32_t key = 0xff000000;          // a pixel with nothing under it (the GPU's parts: the 2D goes there later)
@@ -37,7 +46,7 @@ struct options
 struct result
 {
 	int mark_y1 = 1 << 30, mark_y2 = -1;   // rows holding marks (the caller clears them)
-	size_t tris = 0, rays = 0, shadowed = 0;
+	size_t tris = 0, rays = 0, shadowed = 0, gi_rays = 0;
 };
 
 result render(const scene &s, const target &t, const options &o);

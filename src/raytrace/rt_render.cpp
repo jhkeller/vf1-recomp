@@ -183,6 +183,55 @@ struct bvh
 		split(l + 1, mid, first + count - mid, idx, cen);
 	}
 
+	// The nearest of what lies along o + t d, t > tmin, but `skip`: false if nothing.
+	bool closest(v3 o, v3 d, float tmin, int32_t skip, float &t_hit, int32_t &quad_hit) const
+	{
+		if (nodes.empty()) return false;
+		const v3 inv{ 1.0f / d.x, 1.0f / d.y, 1.0f / d.z };
+		int32_t stack[64];
+		int sp = 0;
+		stack[sp++] = 0;
+		float best = 1e30f;
+		int32_t found = -1;
+		while (sp) {
+			const bnode &n = nodes[stack[--sp]];
+			float t0 = tmin, t1 = best;
+			for (int a = 0; a < 3; a++) {
+				const float ia = comp(inv, a), oa = comp(o, a);
+				float ta = (comp(n.lo, a) - oa) * ia, tb = (comp(n.hi, a) - oa) * ia;
+				if (ta > tb) std::swap(ta, tb);
+				t0 = std::max(t0, ta);
+				t1 = std::min(t1, tb);
+			}
+			if (!(t0 <= t1)) continue;
+			if (n.left < 0) {
+				for (int32_t i = n.first; i < n.first + n.count; i++) {
+					const btri &t = tris[i];
+					if (t.quad == skip) continue;
+					const v3 p = cross(d, t.e2);
+					const float det = dot(t.e1, p);
+					if (std::fabs(det) < 1e-12f) continue;
+					const float id = 1.0f / det;
+					const v3 s = o - t.p0;
+					const float u = dot(s, p) * id;
+					if (u < 0 || u > 1) continue;
+					const v3 q = cross(s, t.e1);
+					const float v = dot(d, q) * id;
+					if (v < 0 || u + v > 1) continue;
+					const float th = dot(t.e2, q) * id;
+					if (th > tmin && th < best) { best = th; found = t.quad; }
+				}
+			} else if (sp + 2 <= 64) {
+				stack[sp++] = n.left;
+				stack[sp++] = n.left + 1;
+			}
+		}
+		if (found < 0) return false;
+		t_hit = best;
+		quad_hit = found;
+		return true;
+	}
+
 	// Whether anything but `skip` lies along o + t d, t > tmin.
 	bool any_hit(v3 o, v3 d, float tmin, int32_t skip) const
 	{
@@ -240,8 +289,32 @@ inline void shade_pixel(uint32_t &p, uint32_t colour, int x, int y, const option
 		p = colour & 0xffffff;
 }
 
+// ---- global illumination's grid ----
+
+struct gi_grid
+{
+	int w = 0, h = 0, step = 0, x0 = 0, y0 = 0;
+	std::vector<int32_t> id;        // the polygon under each point (-1: none), for keeping its history
+	std::vector<float> ao, rgb;     // its ambient light left (1: open), its bounced light (r, g, b)
+};
+
+inline uint32_t hash32(uint32_t x)
+{
+	x ^= x >> 16; x *= 0x7feb352dU; x ^= x >> 15; x *= 0x846ca68bU; x ^= x >> 16;
+	return x;
+}
+inline float unit(uint32_t &s) { s = hash32(s + 0x9e3779b9U); return float(s >> 8) * (1.0f / 16777216.0f); }
+inline v3 rgb_of(uint32_t c) { return { float((c >> 16) & 255) / 255.0f, float((c >> 8) & 255) / 255.0f, float(c & 255) / 255.0f }; }
+inline uint32_t pack(v3 c)
+{
+	auto ch = [](float f) { return uint32_t(std::lround(std::clamp(f, 0.0f, 1.0f) * 255.0f)); };
+	return ch(c.x) << 16 | ch(c.y) << 8 | ch(c.z);
+}
+
 struct buffers
 {
+	std::vector<gi_grid> grids;     // a view's, by its place in the list
+	uint32_t pictures = 0;
 	std::vector<float> depth;
 	std::vector<int32_t> id;
 	std::vector<stri> tris, shadow_tris;
@@ -303,9 +376,11 @@ result render(const scene &s, const target &t, const options &o)
 				});
 		}, 4);
 
-		// the shadows' BVH: every polygon of the view that can block the light, those facing away too
-		if (o.shadows) {
-			b.accel.tris.clear();
+		// the rays' BVH: every polygon of the view that can block the light or send it on, those facing away too
+		const bool need_bvh = o.shadows || o.gi;
+		b.accel.tris.clear();
+		b.accel.nodes.clear();
+		if (need_bvh) {
 			for (uint32_t k = v.first; k < v.first + v.count; k++) {
 				const quad &q = s.quads[k];
 				if (q.flags & (MOIRE | UNLIT)) continue;
@@ -324,7 +399,7 @@ result render(const scene &s, const target &t, const options &o)
 		// say (their outward side faces it): their votes turn the light vector into "toward the light"
 		// for outward normals, which the rays need.
 		float lx = v.light[0], ly = v.light[1], lz = v.light[2];
-		if (o.shadows) {
+		if (need_bvh) {
 			int votes = 0;
 			for (int32_t k : b.order) {
 				const quad &q = s.quads[k];
@@ -340,6 +415,129 @@ result render(const scene &s, const target &t, const options &o)
 		const float ll = std::sqrt(lx * lx + ly * ly + lz * lz);
 		const v3 L = ll > 0 ? v3{ lx / ll, ly / ll, lz / ll } : v3{ 0, 1, 0 };
 		const bool trace = o.shadows && ll > 0 && !b.accel.nodes.empty();
+		const bool gi = o.gi && !b.accel.nodes.empty();
+
+		// a pixel's place in view space, from its depth
+		auto place = [&](float sx, float sy, float depth) {
+			const float z = 1.0f / depth;
+			return v3{ (sx / v.scale - v.ext - v.xc - v.viewx) / v.zoomx * z, (v.yc - sy / v.scale - v.viewy) / v.zoomy * z, z };
+		};
+		// a polygon's unit normal on the side facing `toward`
+		auto facing = [&](const quad &q, v3 toward) {
+			const v3 c0 = corner(q, 0);
+			v3 N = cross(corner(q, 1) - c0, corner(q, 2) - c0);
+			if (dot(N, N) <= 0) N = cross(corner(q, 2) - c0, corner(q, 3) - c0);
+			const float nl = std::sqrt(dot(N, N));
+			if (nl <= 0) return v3{ 0, 0, 0 };
+			N = N * (1.0f / nl);
+			return dot(N, toward) < 0 ? N * -1.0f : N;
+		};
+		// about a pixel's width at depth z: how far a ray starts off its surface
+		auto eps_at = [&](float z) { return 1.5f * std::fabs(z) / (std::fabs(v.zoomx) * v.scale + 1e-6f); };
+
+		// Global illumination, on a grid of points a few render pixels apart: from each, rays over the
+		// hemisphere above its surface (cosine-weighted); each ray that hits a polygon brings back that
+		// polygon's colour as lit where it hit (the game's ambient, and its diffuse unless that point is
+		// in shadow), and a hit closer than `near` takes some of the ambient light away.
+		if (b.grids.size() < s.views.size()) b.grids.resize(s.views.size());
+		gi_grid &G = b.grids[vi];
+		if (gi) {
+			const int g = std::max(2, int(v.scale * 2 + 0.5f));
+			const int gw = (clip[2] - clip[0]) / g + 1, gh = (clip[3] - clip[1]) / g + 1;
+			if (G.w != gw || G.h != gh || G.step != g || G.x0 != clip[0] || G.y0 != clip[1]) {
+				G.w = gw; G.h = gh; G.step = g; G.x0 = clip[0]; G.y0 = clip[1];
+				G.id.assign(size_t(gw) * gh, -1);
+				G.ao.assign(size_t(gw) * gh, 1.0f);
+				G.rgb.assign(size_t(gw) * gh * 3, 0.0f);
+			}
+			const bnode &root = b.accel.nodes[0];
+			const v3 ext = root.hi - root.lo;
+			const float near = 0.15f * std::sqrt(dot(ext, ext));
+			const int nrays = std::max(1, o.gi_rays);
+			const uint32_t pic = ++b.pictures;
+			std::atomic<size_t> gr{ 0 };
+			parallel_rows(gh, [&](int r0, int r1) {
+				size_t my = 0;
+				for (int gy = r0; gy < r1; gy++)
+					for (int gx = 0; gx < gw; gx++) {
+						const size_t gi_ = size_t(gy) * gw + gx;
+						const int x = std::min(clip[2], clip[0] + gx * g + g / 2), y = std::min(clip[3], clip[1] + gy * g + g / 2);
+						const size_t i = size_t(y) * t.w + x;
+						const int32_t qi = b.id[i];
+						if (qi < 0 || (s.quads[qi].flags & UNLIT)) { G.id[gi_] = -1; continue; }
+						const quad &q = s.quads[qi];
+						const v3 P = place(x + 0.5f, y + 0.5f, b.depth[i]);
+						const v3 N = facing(q, P * -1.0f);
+						if (dot(N, N) <= 0) { G.id[gi_] = -1; continue; }
+						const v3 O = P + N * eps_at(P.z);
+						// a frame around N
+						const v3 T = std::fabs(N.x) < 0.9f ? cross(N, v3{ 1, 0, 0 }) : cross(N, v3{ 0, 1, 0 });
+						const v3 Tn = T * (1.0f / std::sqrt(dot(T, T)));
+						const v3 B = cross(N, Tn);
+						uint32_t seed = hash32(uint32_t(gx) * 73856093u ^ uint32_t(gy) * 19349663u ^ pic * 83492791u);
+						float occluded = 0;
+						v3 bounce{ 0, 0, 0 };
+						for (int r = 0; r < nrays; r++) {
+							// stratified over the rays: each takes its own slice of the turn
+							const float u1 = (r + unit(seed)) / nrays, u2 = unit(seed);
+							const float rad = std::sqrt(u1), phi = 6.2831853f * u2;
+							const v3 d = Tn * (rad * std::cos(phi)) + B * (rad * std::sin(phi)) + N * std::sqrt(std::max(0.0f, 1 - u1));
+							float th;
+							int32_t hq;
+							my++;
+							if (!b.accel.closest(O, d, 0.0f, qi, th, hq)) continue;   // (open sky: the ambient light as it is)
+							if (th < near) occluded += 1 - th / near;
+							const quad &h = s.quads[hq];
+							const v3 H = O + d * th;
+							const v3 Nh = facing(h, d * -1.0f);
+							float lambert = ll > 0 ? std::max(0.0f, dot(Nh, L)) : 0;
+							if (lambert > 0) {
+								my++;
+								if (b.accel.any_hit(H + Nh * eps_at(H.z), L, 0.0f, hq)) lambert = 0;
+							}
+							light_param lp{ 0.5f, 0.5f, 0, 0 };
+							if (h.lightmode < s.lightparams.size()) lp = s.lightparams[h.lightmode];
+							const float lum = std::min(1.0f, lp.a + lp.d * lambert);
+							const v3 alb = rgb_of(h.albedo);
+							bounce = bounce + alb * lum;
+						}
+						const float ao = 1 - occluded / nrays;
+						bounce = bounce * (1.0f / nrays);
+						// kept from the pictures before where the same polygon is under it: less noise
+						const float keep = G.id[gi_] == qi ? 0.8f : 0.0f;
+						G.ao[gi_] = G.ao[gi_] * keep + ao * (1 - keep);
+						G.rgb[gi_ * 3 + 0] = G.rgb[gi_ * 3 + 0] * keep + bounce.x * (1 - keep);
+						G.rgb[gi_ * 3 + 1] = G.rgb[gi_ * 3 + 1] * keep + bounce.y * (1 - keep);
+						G.rgb[gi_ * 3 + 2] = G.rgb[gi_ * 3 + 2] * keep + bounce.z * (1 - keep);
+						G.id[gi_] = qi;
+					}
+				gr += my;
+			}, 2);
+			res.gi_rays += gr;
+		}
+		// a pixel's global illumination: its grid's points around it that lie on its polygon, weighed by nearness
+		auto gi_at = [&](int x, int y, int32_t qi, float &ao, v3 &bounce) {
+			const float fx = float(x - G.x0 - G.step / 2) / G.step, fy = float(y - G.y0 - G.step / 2) / G.step;
+			const int gx0 = int(std::floor(fx)), gy0 = int(std::floor(fy));
+			float wsum = 0, a = 0;
+			v3 c{ 0, 0, 0 };
+			for (int dy = -1; dy <= 2; dy++)
+				for (int dx = -1; dx <= 2; dx++) {
+					const int gx = gx0 + dx, gy = gy0 + dy;
+					if (gx < 0 || gy < 0 || gx >= G.w || gy >= G.h) continue;
+					const size_t k = size_t(gy) * G.w + gx;
+					if (G.id[k] != qi) continue;
+					const float ddx = fx - gx, ddy = fy - gy;
+					const float w = 1.0f / (0.25f + ddx * ddx + ddy * ddy);
+					wsum += w;
+					a += G.ao[k] * w;
+					c = c + v3{ G.rgb[k * 3], G.rgb[k * 3 + 1], G.rgb[k * 3 + 2] } * w;
+				}
+			if (wsum <= 0) { ao = 1; bounce = { 0, 0, 0 }; return false; }
+			ao = a / wsum;
+			bounce = c * (1.0f / wsum);
+			return true;
+		};
 
 		// the colours
 		std::atomic<size_t> rays{ 0 }, shadowed{ 0 };
@@ -352,26 +550,26 @@ result render(const scene &s, const target &t, const options &o)
 					const int32_t qi = b.id[i];
 					if (qi < 0) continue;
 					const quad &q = s.quads[qi];
-					uint32_t c = q.lit;
+					bool lit = true;
 					if (trace && q.shade != q.lit && !(q.flags & UNLIT)) {
-						// the pixel's place in view space, from its depth
-						const float z = 1.0f / b.depth[i];
-						const float px = ((x + 0.5f) / v.scale - v.ext - v.xc - v.viewx) / v.zoomx * z;
-						const float py = (v.yc - (y + 0.5f) / v.scale - v.viewy) / v.zoomy * z;
-						const v3 P{ px, py, z };
-						// off the surface toward the camera, by about a pixel's width there
-						const v3 c0 = corner(q, 0);
-						v3 N = cross(corner(q, 1) - c0, corner(q, 2) - c0);
-						if (dot(N, N) <= 0) N = cross(corner(q, 2) - c0, corner(q, 3) - c0);
-						const float nl = std::sqrt(dot(N, N));
-						if (nl > 0) {
-							N = N * (1.0f / nl);
-							if (dot(N, P) > 0) N = N * -1.0f;
-						}
-						const float eps = 1.5f * z / (std::fabs(v.zoomx) * v.scale + 1e-6f);
+						const v3 P = place(x + 0.5f, y + 0.5f, b.depth[i]);
+						const v3 N = facing(q, P * -1.0f);
+						const float eps = eps_at(P.z);
 						const v3 O = P + N * eps + L * eps;
 						my_rays++;
-						if (b.accel.any_hit(O, L, 0.0f, qi)) { c = q.shade; my_shadowed++; }
+						if (b.accel.any_hit(O, L, 0.0f, qi)) { lit = false; my_shadowed++; }
+					}
+					uint32_t c = lit ? q.lit : q.shade;
+					float ao;
+					v3 bounce;
+					if (gi && !(q.flags & UNLIT) && gi_at(x, y, qi, ao, bounce)) {
+						// the ambient part (its colour in shadow) darkened where it's hemmed in, the direct
+						// part as lit or not, and the light bounced onto it from round about
+						const v3 amb = rgb_of(q.shade), full = rgb_of(q.lit), alb = rgb_of(q.albedo);
+						const v3 direct = lit ? v3{ std::max(0.0f, full.x - amb.x), std::max(0.0f, full.y - amb.y), std::max(0.0f, full.z - amb.z) } : v3{ 0, 0, 0 };
+						const float occ = 1 - o.ao_strength * (1 - ao);
+						const v3 out = amb * occ + direct + v3{ alb.x * bounce.x, alb.y * bounce.y, alb.z * bounce.z } * o.gi_strength;
+						c = pack(out);
 					}
 					row[x] = c;
 				}

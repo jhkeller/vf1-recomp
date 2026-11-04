@@ -11,7 +11,7 @@ Plan: https://claude.ai/artifact/CxsJ2TfuvCrxLyN3LPSvU7
 | 2 | Depth-buffered raster of the capture, in the game's own colours (CPU) | Done |
 | 3 | Ray-traced shadows through a BVH, the game's MOIRE blob shadows off (CPU; GPU compute port to come) | Done (CPU) |
 | 4 | Floor reflections, the sky panorama for misses | |
-| 5 | One-bounce GI, temporal accumulation, denoiser | |
+| 5 | One-bounce GI and ambient occlusion on a coarse grid, kept across pictures (CPU) | Done (CPU) |
 | 6 | Metal, menu settings, tuning | |
 
 ## Phase 1: checking the capture
@@ -31,12 +31,24 @@ nothing changes.
 Code: `src/machine/model1_rt.cpp`, the `rt_*` types in `src/machine/model1.h`, and the hooks in
 `push_object` / `tgp_render` (`src/machine/model1_video.cpp`).
 
-## Phases 2 and 3: the ray-traced renderer
+## Phases 2, 3 and 5: the ray-traced renderer
+
+In the game: Display > **Ray-traced shadows** (F7) and **Ray-traced lighting** (F8), saved in
+settings.ini (`rt_shadows`, `rt_gi`). Or from the environment, over the settings:
 
 ```
 VF_RT=shadows build/bin/vf-native   # ray-traced shadows instead of the game's blob shadows
-VF_RT=raster  build/bin/vf-native   # the same renderer without them: should look like the arcade's
+VF_RT=gi      build/bin/vf-native   # and global illumination
+VF_RT=raster  build/bin/vf-native   # the renderer with nothing traced: should look like the arcade's
 ```
+
+Global illumination: from points on a grid a few render pixels apart, cosine-weighted rays over the
+hemisphere; a hit brings back the hit polygon's albedo lit by the game's ambient and diffuse (with a
+shadow ray at the hit), and near hits darken the ambient term (ambient occlusion). Each grid point
+keeps 80% of its last value while the same polygon is under it, and pixels take the grid points on
+their own polygon, weighted by distance. A pixel's colour is then
+`shade * occlusion + (lit - shade) * visible + albedo * bounce * 0.6`, so open surfaces keep the
+game's colours exactly.
 
 Code: `src/raytrace/rt_render.cpp` (`rt::render`), called from `model1::rt_end`. Each viewport's
 polygons are drawn with a depth buffer in the game's paint order; each lit pixel then sends a ray

@@ -794,6 +794,8 @@ public:
 	// line, a vertex that isn't a number) or a GPU error: that picture drawn by the CPU from the
 	// recording. Off: the CPU's way, untouched.
 	void set_gpu3d(gpu3d *g) { m_gpu3d = g; }
+	// ray tracing (src/raytrace, model1_rt.cpp): shadows, global illumination; either on, the 3D is the ray-traced renderer's
+	void set_rt(bool shadows, bool gi) { m_rt_shadows = shadows; m_rt_gi = gi; m_rt_capture = m_rt_dump || rt_on(); }
 	void set_gpu3d_on(bool on) { m_gpu3d_on = on; }
 	// The host's renderer is on the 3D's GPU device (SDL's "gpu" renderer): pictures put together in
 	// parts have their 3D drawn straight into its textures (gpu_parts::d3_target), not into frame().
@@ -1131,10 +1133,14 @@ private:
 
 	// Ray-traced lighting (src/machine/model1_rt.cpp, src/raytrace): the 3D scene as the game built
 	// it, gathered while m_rt_capture is on; drawn by the ray-traced renderer instead of the
-	// arcade's while m_rt_mode is (VF_RT). Off, nothing the game or the arcade renderers draw changes.
-	enum rt_mode_t { RT_OFF = 0, RT_RASTER = 1, RT_SHADOWS = 2 };
-	int m_rt_mode = RT_OFF;
+	// arcade's while any of its modes is on (the menu's Display > Ray-traced shadows / Ray-traced
+	// lighting, F7 / F8, or VF_RT). Off, nothing the game or the arcade renderers draw changes.
+	bool m_rt_raster = false;    // its renderer, with nothing ray-traced (VF_RT=raster: should look as the arcade's)
+	bool m_rt_shadows = false;   // ray-traced shadows instead of the game's blob shadows
+	bool m_rt_gi = false;        // ray-traced global illumination: light bounced off what's near, and ambient occlusion
+	bool m_rt_dump = false;      // (VF_RT_CAPTURE / VF_RT_DUMP: the capture kept on)
 	bool m_rt_capture = false;
+	bool rt_on() const { return m_rt_raster || m_rt_shadows || m_rt_gi; }
 	rt::scene m_rt_scene;
 	void rt_begin();
 	void rt_view_set();

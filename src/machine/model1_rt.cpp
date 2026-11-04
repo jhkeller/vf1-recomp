@@ -104,13 +104,14 @@ void model1::rt_end(bitmap_rgb32 &bitmap, const rectangle &cliprect)
 		m_rt_scene.lightparams[i] = { l.a, l.d, l.s, l.p };
 	}
 
-	if (m_rt_mode) {
+	if (rt_on()) {
 		rt::target t;
 		t.px = &bitmap.pix(0);
 		t.w = bitmap.width(); t.h = bitmap.height(); t.stride = size_t(bitmap.width());
 		t.cx0 = cliprect.min_x; t.cx1 = cliprect.max_x; t.cy0 = cliprect.min_y; t.cy1 = cliprect.max_y;
 		rt::options o;
-		o.shadows = m_rt_mode == RT_SHADOWS;
+		o.shadows = m_rt_shadows;
+		o.gi = m_rt_gi;
 		o.game_shadows = !o.shadows;
 		o.blend_shadows = s_moire_blend;
 		o.key = KEY; o.shadow_key = SHADOW_KEY; o.mark = 0x01000000;   // (model1_video.cpp's MOIRE_MARK)

@@ -726,7 +726,7 @@ void model1::draw_quads(bitmap_rgb32 &bitmap, const rectangle &cliprect)
 	view->y2 = std::min(view->y2, cliprect.max_y);
 
 	if (m_rec) { if (count > 0) record_quads(view, count); }
-	else if (m_rt_mode) {}   // (the ray-traced renderer draws the picture from its capture: rt_end)
+	else if (rt_on()) {}   // (the ray-traced renderer draws the picture from its capture: rt_end)
 	else {
 		const uint64_t t0 = trace_ns();
 		raster_quads(bitmap, view, count);
@@ -2544,10 +2544,14 @@ void model1::video_start()
 
 	// ray-traced lighting's scene capture (model1_rt.cpp): for its dumps
 	// and its renderer (VF_RT=raster: the scene depth-buffered, the game's own colours; VF_RT=shadows:
-	// with ray-traced shadows instead of the game's)
-	if (const char *m = getenv("VF_RT"))
-		m_rt_mode = !strcmp(m, "shadows") || !strcmp(m, "2") ? RT_SHADOWS : !strcmp(m, "raster") || !strcmp(m, "1") ? RT_RASTER : RT_OFF;
-	m_rt_capture = getenv("VF_RT_CAPTURE") || getenv("VF_RT_DUMP") || m_rt_mode;
+	// with ray-traced shadows instead of the game's; VF_RT=gi: and ray-traced global illumination).
+	// The host sets it from its menu after (set_rt); VF_RT wins there too.
+	m_rt_dump = getenv("VF_RT_CAPTURE") || getenv("VF_RT_DUMP");
+	if (const char *m = getenv("VF_RT")) {
+		m_rt_raster = !strcmp(m, "raster");
+		set_rt(!strcmp(m, "shadows") || !strcmp(m, "gi"), !strcmp(m, "gi"));
+	}
+	m_rt_capture = m_rt_dump || rt_on();
 }
 
 // Snapshot the HUD after the cat1 tilemaps are composited: a pixel is a bright

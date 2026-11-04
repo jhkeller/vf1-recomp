@@ -546,6 +546,7 @@ struct settings
 	int scale = 2, aspect = 0, volume = 100, music = 100, effects = 100, aa = 1, filter = 0, ring = 0;
 	int crt_colours = 0, brightness = 100, gamma = 100;   // the picture's colours: an arcade monitor's (crt::PRESETS), the player's brightness and gamma (%)
 	int renderer3d = 2;     // the 3D's renderer: 0 the CPU, 1 the GPU, 2 Auto (whichever is quicker here)
+	bool rt_shadows = false, rt_gi = false;   // ray-traced shadows, ray-traced lighting (src/raytrace: the 3D on the CPU while either is on)
 	int graphics = 0;       // Windows: the GPU's driver, from the next start: 0 Auto (Vulkan first, Direct3D 12 if it won't start), 1 Direct3D 12
 	int akira_slot = 0;     // Cheats: who plays in Akira's place (model1::UNUSED_CHARACTERS; 0 Akira)
 	bool random_cpu = false;   // Cheats: with Random fighter, the computer's every opponent a random fighter too
@@ -620,6 +621,8 @@ struct settings
 		flag("show_fps", show_fps);
 		num("arcade_coins", arcade_coin, -1, 0xffff);
 		num("renderer_3d", renderer3d, 0, 2);
+		flag("rt_shadows", rt_shadows);
+		flag("rt_gi", rt_gi);
 		num("graphics", graphics, 0, 1);
 		num("akira_slot", akira_slot, 0, int(std::size(model1::UNUSED_CHARACTERS)) - 1);
 		num("random_fighter", random_fighter, 0, 2);   // (0 off, else on: 2 was "Looks + moves", now what on is)
@@ -686,6 +689,7 @@ struct settings
 		if (!log) fprintf(f, "log = 0\n");
 		if (arcade_coin >= 0) fprintf(f, "arcade_coins = %d\n", arcade_coin);
 		fprintf(f, "renderer_3d = %d\n", renderer3d);
+		fprintf(f, "rt_shadows = %d\nrt_gi = %d\n", int(rt_shadows), int(rt_gi));
 		if (graphics) fprintf(f, "graphics = %d\n", graphics);
 		if (akira_slot) fprintf(f, "akira_slot = %d\n", akira_slot);
 		for (int p = 0; p < 2; p++) {
@@ -1088,6 +1092,11 @@ int main(int argc, char **argv)
 	g_pc_mode = !cfg.arcade;
 	// the 3D's renderer: VF_3D=cpu|gpu|auto (tests) over the setting
 	if (const char *r = getenv("VF_3D")) cfg.renderer3d = !strcmp(r, "cpu") ? 0 : !strcmp(r, "gpu") ? 1 : 2;
+	// ray tracing: VF_RT=shadows|gi|off over the settings (raster: the machine's own, for tests)
+	if (const char *r = getenv("VF_RT")) {
+		cfg.rt_shadows = !strcmp(r, "shadows") || !strcmp(r, "gi");
+		cfg.rt_gi = !strcmp(r, "gi");
+	}
 #if VF_GPU3D_METAL
 	gpu3d_metal_prewarm();   // (its shaders compiled while the game boots: ready if the menu or Auto picks it)
 #endif
@@ -1608,6 +1617,7 @@ int main(int argc, char **argv)
 		cfg.auto_3d = out + (out.empty() ? "" : ",") + k + (gpu ? "g" : "c");
 	};
 	auto apply_3d = [&] { m.set_gpu3d_on(g3 && !a3.broken && a3.gpu); m.m_gpu3d_chosen = cfg.renderer3d == 1; };
+	m.set_rt(cfg.rt_shadows, cfg.rt_gi);
 	auto renderer_name = [&]() -> std::string {
 #if VF_GPU3D_METAL
 		if (!g3 || a3.broken) return "CPU (no GPU here)";
@@ -2053,6 +2063,13 @@ int main(int argc, char **argv)
 	menu.set_footer(std::string("Virtua Fighter Recomp ") + VF_VERSION + (*VF_DATE ? std::string(" \u00b7 ") + VF_DATE : ""));
 	// a new scale or shape reallocates the picture: draw it again at once when the game is stopped
 	auto redraw_if_stopped = [&] { if (paused || menu.is_open()) { m.set_stopped(true); m.redraw(); m.set_stopped(false); still_dirty = true; } };
+	// ray tracing on or off (Display > Ray-traced shadows / lighting, F7 / F8)
+	auto apply_rt = [&](const char *what, bool on) {
+		m.set_rt(cfg.rt_shadows, cfg.rt_gi);
+		cfg_dirty = true;
+		redraw_if_stopped();
+		if (what) menu.toast(std::string(what) + (on ? ": on" : ": off"), 2);
+	};
 	// Reset (the menu, F3): the menu closes, a paused game unpauses, and the screen goes black at
 	// once while the boot runs unseen (a few seconds on a slow machine), not the last picture held.
 	// the arcade settings as their page opened (and the ring): see arcade_page
@@ -2169,6 +2186,14 @@ int main(int argc, char **argv)
 				menu.toast("");
 			} });
 #endif
+		p.items.push_back({ "Ray-traced shadows",
+			"Real shadows cast by the fighters and the stage, traced from the game's light, instead of the game's dark patches under the fighters. Drawn on the CPU for now: keep the render scale at 2x or 3x. (F7)",
+			[&] { return on_off(cfg.rt_shadows); },
+			[&](int) { cfg.rt_shadows = !cfg.rt_shadows; apply_rt(nullptr, cfg.rt_shadows); } });
+		p.items.push_back({ "Ray-traced lighting",
+			"Global illumination: light bounces off the floor and the fighters onto what's near them, and corners and contact points get softly darker. Drawn on the CPU for now: keep the render scale at 2x or 3x. (F8)",
+			[&] { return on_off(cfg.rt_gi); },
+			[&](int) { cfg.rt_gi = !cfg.rt_gi; apply_rt(nullptr, cfg.rt_gi); } });
 		p.items.push_back({ "Picture shape",
 			"Fit the window fills any screen shape. The other shapes add black bars to keep their shape; 4:3 is the original arcade screen. (F6)",
 			[&] { return std::string(aspect_i ? ASPECT_NAMES[aspect_i] : "Fit the window"); },
@@ -2492,7 +2517,7 @@ int main(int argc, char **argv)
 							// the game's own keys (pause, reset, the menu's shortcuts, the cabinet's coin and
 							// test buttons) stay theirs: wait for another key
 							static const SDL_Scancode RESERVED[] = { SDL_SCANCODE_P, SDL_SCANCODE_TAB, SDL_SCANCODE_F3,
-								SDL_SCANCODE_F5, SDL_SCANCODE_F6, SDL_SCANCODE_F9, SDL_SCANCODE_F11, SDL_SCANCODE_F12 };
+								SDL_SCANCODE_F5, SDL_SCANCODE_F6, SDL_SCANCODE_F7, SDL_SCANCODE_F8, SDL_SCANCODE_F9, SDL_SCANCODE_F11, SDL_SCANCODE_F12 };
 							for (SDL_Scancode r : RESERVED) if (k == r) return false;
 							for (const auto &sk : SYS_KEYS) if (k == sk.key) return false;
 							// a key does one thing: take it off whatever had it
@@ -3452,6 +3477,8 @@ int main(int argc, char **argv)
 				else if (e.key.scancode == SDL_SCANCODE_F3) reset_game();
 				else if (e.key.scancode == SDL_SCANCODE_F5) player_scale_to(cfg.scale % 6 + 1);
 				else if (e.key.scancode == SDL_SCANCODE_F6) set_shape((aspect_i + 1) % N_ASPECTS);
+				else if (e.key.scancode == SDL_SCANCODE_F7) { cfg.rt_shadows = !cfg.rt_shadows; apply_rt("Ray-traced shadows", cfg.rt_shadows); }
+				else if (e.key.scancode == SDL_SCANCODE_F8) { cfg.rt_gi = !cfg.rt_gi; apply_rt("Ray-traced lighting", cfg.rt_gi); }
 				else if (e.key.scancode == SDL_SCANCODE_F12) {
 					// F12: the picture as drawn, into Screenshots in the data folder (numbered, never overwritten)
 					std::error_code ec;

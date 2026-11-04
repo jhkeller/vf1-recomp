@@ -119,6 +119,27 @@ static int run(const std::string &dir, float sign)
 	expect("floor in the blue box's shadow", 160 + 105, -100, 690 + 63, floor_shade);
 	expect("red box's front", -10, -40, 450, 0xc04040);
 	expect("floor where the game's shadow was", -200, -100, 340, floor_lit);
+
+	// global illumination: the floor at the red box's foot loses some of its ambient light (ambient
+	// occlusion) against the open floor, and takes on some of the box's red
+	s.lightparams.assign(256, light_param{ 0.4f, 0.6f, 0, 0 });
+	o.gi = true;
+	o.gi_rays = 32;
+	for (int k = 0; k < 8; k++) { std::fill(px.begin(), px.end(), 0x202020); r = render(s, t, o); }
+	write_ppm(dir + "/rt_gi.ppm", px, W, H);
+	printf("gi: %zu rays a picture\n", r.gi_rays);
+	auto at = [&](float x, float y, float z) { int sx, sy; project(x, y, z, sx, sy); return px[size_t(sy) * W + sx] & 0xffffff; };
+	auto r8 = [](uint32_t c) { return int((c >> 16) & 255); };
+	auto lum = [](uint32_t c) { return int((c >> 16) & 255) + int((c >> 8) & 255) + int(c & 255); };
+	auto check = [&](const char *what, bool ok, uint32_t a, uint32_t b) {
+		printf("  %-34s %06x vs %06x %s\n", what, a, b, ok ? "ok" : "WRONG");
+		if (!ok) fails++;
+	};
+	{
+		const uint32_t foot = at(-80, -100, 470), open = at(-300, -100, 1200);
+		check("floor at the box's foot darker (AO)", lum(foot) < lum(open), foot, open);
+		check("floor at the box's foot redder (bounce)", r8(foot) > r8(open), foot, open);
+	}
 	return fails;
 }
 
