@@ -726,6 +726,7 @@ void model1::draw_quads(bitmap_rgb32 &bitmap, const rectangle &cliprect)
 	view->y2 = std::min(view->y2, cliprect.max_y);
 
 	if (m_rec) { if (count > 0) record_quads(view, count); }
+	else if (m_rt_mode) {}   // (the ray-traced renderer draws the picture from its capture: rt_end)
 	else {
 		const uint64_t t0 = trace_ns();
 		raster_quads(bitmap, view, count);
@@ -1545,7 +1546,7 @@ void model1::push_object(uint32_t tex_adr, uint32_t poly_adr, uint32_t size, flo
 #endif
 
 		quad_t cquad;
-		uint32_t rt_albedo = 0;   // (the capture's: its colour unlit, below)
+		uint32_t rt_albedo = 0, rt_shade = 0;   // (the capture's: its colour unlit and in shadow, below)
 
 		if (!link)
 			goto next;
@@ -1555,8 +1556,8 @@ void model1::push_object(uint32_t tex_adr, uint32_t poly_adr, uint32_t size, flo
 			// in its pen's colour (no recolouring: that has state the drawn polygons keep))
 			if (m_rt_capture && !built) {
 				const uint16_t td = m_tgp_ram[tex_adr - 0x40000];
-				rt_add(old_p1, old_p0, p0, p1, glm::normalize(vn), rt_palette_colour(td), 0, rt_obj, lightmode,
-					uint8_t(RT_CULLED | ((flags & 0x00002000) ? RT_MOIRE : 0) | (stage_model(rt_obj) ? RT_STAGE : 0) | ((td & 0x400) ? RT_UNLIT : 0)));
+				rt_add(old_p1, old_p0, p0, p1, glm::normalize(vn), rt_palette_colour(td), 0, 0, rt_obj, lightmode,
+					uint8_t(rt::CULLED | ((flags & 0x00002000) ? rt::MOIRE : 0) | (stage_model(rt_obj) ? rt::STAGE : 0) | ((td & 0x400) ? rt::UNLIT : 0)));
 			}
 			goto next;
 		}
@@ -1792,7 +1793,14 @@ void model1::push_object(uint32_t tex_adr, uint32_t poly_adr, uint32_t size, flo
 				cquad.col = c;
 			} else
 				cquad.col = colour_of(lumval);
-			if (m_rt_capture) rt_albedo = (tex_data & 0x400) ? cquad.col : colour_of(0xff);
+			if (m_rt_capture) {
+				rt_albedo = (tex_data & 0x400) ? cquad.col : colour_of(0xff);
+				// (in shadow: the light's direct part (diffuse and specular) gone, the ambient left; a polygon
+				// facing away from the light is as the game drew it)
+				const bool lit_side = glm::dot(vn, m_view->light) > 0;
+				rt_shade = (tex_data & 0x400) || !lit_side ? cquad.col
+					: colour_of(int(255.0f * std::min(1.0f, m_view->lightparams[lightmode].a)));
+			}
 		}
 
 		if (flags & 0x00002000)
@@ -1800,9 +1808,9 @@ void model1::push_object(uint32_t tex_adr, uint32_t poly_adr, uint32_t size, flo
 		if (m_rt_capture) {
 			const uint16_t td = m_tgp_ram[tex_adr - 0x40000];
 			const bool recoloured = head_hue >= 0 || outfit >= 0 || skin_rec || chrome_lm >= 0 || build;
-			rt_add(old_p1, old_p0, p0, p1, vn, rt_albedo, cquad.col & 0xffffff, rt_obj, lightmode,
-				uint8_t(((flags & 0x00002000) ? RT_MOIRE : 0) | (stage_model(rt_obj) ? RT_STAGE : 0) | ((td & 0x400) ? RT_UNLIT : 0) |
-					((flags & 0x00004000) ? RT_TWO_SIDED : 0) | (recoloured ? RT_RECOLOURED : 0)));
+			rt_add(old_p1, old_p0, p0, p1, vn, rt_albedo, cquad.col & 0xffffff, rt_shade, rt_obj, lightmode,
+				uint8_t(((flags & 0x00002000) ? rt::MOIRE : 0) | (stage_model(rt_obj) ? rt::STAGE : 0) | ((td & 0x400) ? rt::UNLIT : 0) |
+					((flags & 0x00004000) ? rt::TWO_SIDED : 0) | (recoloured ? rt::RECOLOURED : 0)), cquad.z);
 		}
 		if (fighters_only && (cquad.col & MOIRE)) goto next;   // (and no shadows; the strip's points still move on)
 
@@ -2395,7 +2403,7 @@ void model1::tgp_render(bitmap_rgb32 &bitmap, const rectangle &cliprect, render_
 		}
 	end:
 		draw_objects(bitmap, cliprect);
-		if (pass == RENDER_BELOW_HUD && m_rt_capture) rt_end();
+		if (pass == RENDER_BELOW_HUD && m_rt_capture) rt_end(bitmap, cliprect);
 	}
 }
 
@@ -2534,8 +2542,12 @@ void model1::video_start()
 	m_clipfn[3].m_isclipped = &model1::fclip_isc_right;
 	m_clipfn[3].m_clip = &model1::fclip_clip_right;
 
-	// ray-traced lighting's scene capture (model1_rt.cpp): for now only for its dumps
-	m_rt_capture = getenv("VF_RT_CAPTURE") || getenv("VF_RT_DUMP");
+	// ray-traced lighting's scene capture (model1_rt.cpp): for its dumps
+	// and its renderer (VF_RT=raster: the scene depth-buffered, the game's own colours; VF_RT=shadows:
+	// with ray-traced shadows instead of the game's)
+	if (const char *m = getenv("VF_RT"))
+		m_rt_mode = !strcmp(m, "shadows") || !strcmp(m, "2") ? RT_SHADOWS : !strcmp(m, "raster") || !strcmp(m, "1") ? RT_RASTER : RT_OFF;
+	m_rt_capture = getenv("VF_RT_CAPTURE") || getenv("VF_RT_DUMP") || m_rt_mode;
 }
 
 // Snapshot the HUD after the cat1 tilemaps are composited: a pixel is a bright

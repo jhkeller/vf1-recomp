@@ -28,7 +28,7 @@ NET = src/net/session.cpp src/net/link.cpp src/net/stun.cpp src/net/room_link.cp
 ONLINE = src/host/online.cpp src/host/vf1_netplay.cpp $(NET)
 SOUND = src/machine/m1audio.cpp src/machine/multipcm.cpp third_party/ymfm/ymfm_opn.cpp third_party/ymfm/ymfm_adpcm.cpp third_party/ymfm/ymfm_ssg.cpp
 MUSASHI_OBJ = $(OBJ)/musashi/m68kcpu.o $(OBJ)/musashi/m68kops.o $(OBJ)/musashi/m68kdasm.o $(OBJ)/musashi/softfloat.o
-MACHINE = src/machine/model1.cpp src/machine/model1_tgp.cpp src/machine/model1_tgp_lle.cpp src/machine/model1_video.cpp src/machine/model1_sky.cpp src/machine/model1_interp.cpp src/machine/model1_gpu.cpp src/machine/model1_rt.cpp src/machine/model1_edge_aa.cpp src/machine/model1io.cpp src/machine/model1_state.cpp
+MACHINE = src/machine/model1.cpp src/machine/model1_tgp.cpp src/machine/model1_tgp_lle.cpp src/machine/model1_video.cpp src/machine/model1_sky.cpp src/machine/model1_interp.cpp src/machine/model1_gpu.cpp src/machine/model1_rt.cpp src/raytrace/rt_render.cpp src/machine/model1_edge_aa.cpp src/machine/model1io.cpp src/machine/model1_state.cpp
 Z80_OBJ = $(OBJ)/z80/z80.o
 DASM = third_party/mame/v60/v60d.cpp
 # the recompile done on the player's machine: analysis + native code (sljit, BSD-2)
@@ -225,3 +225,8 @@ clean:
 
 -include $(shell find $(OBJ) -name '*.d' 2>/dev/null)
 .PHONY: all clean regions
+
+# The ray-traced renderer on a made-up scene (no ROM): build/bin/rttest [out_dir]
+$(BIN)/rttest: $(call objs,tools/rt_test.cpp src/raytrace/rt_render.cpp)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $^ -o $@ -lpthread
