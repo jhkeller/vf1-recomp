@@ -397,9 +397,9 @@ void main()
 	const int x = min(CX1, CX0 + int(fx * step + step / 2u)), y = min(CY1, CY0 + int(fy * step + step / 2u));
 	const uint i = pixel_at(x, y);
 	const uint b = t * 4u;
-	// (nothing drawn there, the sky behind: the haze as far as three times the view's typical depth)
+	// (nothing drawn there, the sky behind: the haze as far as twice the view's typical depth)
 	const bool sky = IDB[i] == 0u;
-	const vec3 P = sky ? place(float(x) + 0.5, float(y) + 0.5, 1.0 / (3.0 * x0.w)) : place(float(x) + 0.5, float(y) + 0.5, fl(DEPTH[i]));
+	const vec3 P = sky ? place(float(x) + 0.5, float(y) + 0.5, 1.0 / (2.0 * x0.w)) : place(float(x) + 0.5, float(y) + 0.5, fl(DEPTH[i]));
 	const float dist = length(P);
 	const vec3 dir = P / dist;
 	const vec3 L = lt.xyz;
@@ -417,9 +417,9 @@ void main()
 		const bool blocked = lt.w > 0.0 && trace(S, L, 0xffffffffu, S, 0.0, true, th, hq);
 		if (!blocked) scattered += exp(-sigma * tk) * sigma * dt;
 	}
-	// forward scattering (Henyey-Greenstein, g 0.4, isotropic as 1, at most 3): brighter looking toward the light
-	const float g = 0.4, ct = dot(dir, L);
-	scattered *= min(3.0, (1.0 - g * g) / pow(max(1e-4, 1.0 + g * g - 2.0 * g * ct), 1.5));
+	// forward scattering (Henyey-Greenstein, g 0.6, isotropic as 1, at most 4): brighter looking toward the light
+	const float g = 0.6, ct = dot(dir, L);
+	scattered *= min(4.0, (1.0 - g * g) / pow(max(1e-4, 1.0 + g * g - 2.0 * g * ct), 1.5));
 	const float through = exp(-sigma * dist);
 	// kept from the pictures before where the depth there is much the same (the steps' jitter averaged out)
 	const float z0 = fl(FOG[b + 2u]), zs = sky ? -1.0 : P.z;

@@ -3406,6 +3406,12 @@ int main(int argc, char **argv)
 		const uint64_t pass_t = SDL_GetTicksNS();
 		tp = trace_pass{};
 		const int64_t pass = frames_run++;   // counted in every run: VF_MENU_KEYS and VF_SHOT_AT work without VF_QUIT_AFTER
+		{
+			// testing: VF_RT_AT=n leaves ray tracing off until pass n (a slow software GPU reaches the fight sooner)
+			static const int64_t rt_at = getenv("VF_RT_AT") ? atoll(getenv("VF_RT_AT")) : -1;
+			if (rt_at > 0 && pass == 0) m.set_rt(false, false, false);
+			if (rt_at > 0 && pass == rt_at) m.set_rt(cfg.rt_shadows, cfg.rt_gi, cfg.rt_fog);
+		}
 		if (quit_after >= 0 && pass >= quit_after) {
 			write_png("build/host_last.png", saved_frame(), shown_w(), shown_h());
 			break;
@@ -4048,6 +4054,11 @@ int main(int argc, char **argv)
 		m.set_ranking_names(own_rank_names);
 		g_match_board = false;
 	}
+	// (the ray tracer's GPU device let go of before SDL closes: after it, its destruction crashed)
+	m.set_rt_gpu(nullptr);
+#if VF_GPU3D_SDL
+	rt_gpu.reset();
+#endif
 	if (quit_after >= 0 && !getenv("VF_SAVE")) { SDL_Quit(); return 0; }   // test runs leave the saves and settings alone (VF_SAVE: they save, as a player's)
 	keep_arcade_coins();
 	saver.finish();   // (an autosave still being written, done before the last save: the same files)
