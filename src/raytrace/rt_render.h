@@ -43,6 +43,11 @@ struct options
 	float fog_density = 0.15f;   // the haze: how much light a ray loses by the view's typical depth
 	float fog_strength = 1.0f;   // how bright the lit haze is
 	int fog_steps = 16;          // steps along each ray a picture (each its own shadow ray)
+	bool spot = false;           // a spotlight (the GPU's only): the light a pool around the view's centre, darker away from it
+	float spot_inner = 0.25f;    // the pool's full light out to this far from its axis (a share of the view's typical depth)
+	float spot_outer = 0.8f;     // and none past this
+	float spot_dim = 0.4f;       // the ambient light outside the pool, as a share of the game's
+	float spot_sky = 0.55f;      // the sky's brightness with it on
 	int gi_view = 0;             // 0 the picture; debugging: 1 ambient occlusion alone (grey), 2 bounced light alone
 	bool game_shadows = true;    // the game's shadow polygons
 	bool blend_shadows = true;   // they halve the pixel beneath (above 1x); false: the arcade's checkerboard

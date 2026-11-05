@@ -23,7 +23,7 @@ namespace {
 
 using clk = std::chrono::steady_clock;
 
-enum : uint32_t { F_TRACE = 1, F_GI = 2, F_GAME_SHADOWS = 4, F_BLEND = 8, F_CLEAR_OUT = 16, F_FOG = 32 };
+enum : uint32_t { F_TRACE = 1, F_GI = 2, F_GAME_SHADOWS = 4, F_BLEND = 8, F_CLEAR_OUT = 16, F_FOG = 32, F_SPOT = 64 };
 enum { RO_TRIS, RO_JOBS, RO_QUADS, RO_NODES, RO_BTRIS, RO_LIGHTS, RO_N };
 enum { RW_DEPTH, RW_NEAR, RW_ID, RW_VIS, RW_MOIRE, RW_OUT, RW_GRID, RW_FOG, RW_N };
 enum { K_CLEAR, K_DEPTH, K_NEAR, K_ID, K_MOIRE, K_GI, K_SHADOW, K_FOG, K_COLOUR, K_N };
@@ -37,6 +37,7 @@ struct uniforms   // (rt_gpu.comp's U, std140: all four-word rows)
 	uint32_t k0[4];
 	float x0[4];
 	uint32_t x1[4];
+	float x2[4];
 };
 
 inline uint32_t bits(float f) { uint32_t u; memcpy(&u, &f, 4); return u; }
@@ -258,7 +259,7 @@ public:
 			uniforms u = {};
 			u.u0[0] = uint32_t(t.w); u.u0[1] = uint32_t(clip[0]); u.u0[2] = uint32_t(clip[1]); u.u0[3] = uint32_t(clip[2]);
 			u.u1[0] = uint32_t(clip[3]);
-			u.u1[3] = (trace ? F_TRACE : 0) | (gi ? F_GI : 0) | (moire ? F_GAME_SHADOWS : 0) | (o.blend_shadows ? F_BLEND : 0) | (fog ? F_FOG : 0);
+			u.u1[3] = (trace ? F_TRACE : 0) | (gi ? F_GI : 0) | (moire ? F_GAME_SHADOWS : 0) | (o.blend_shadows ? F_BLEND : 0) | (fog ? F_FOG : 0) | (o.spot && P.ll > 0 ? F_SPOT : 0);
 			u.v0[0] = v.xc; u.v0[1] = v.yc; u.v0[2] = v.zoomx; u.v0[3] = v.zoomy;
 			u.v1[0] = v.viewx; u.v1[1] = v.viewy; u.v1[2] = v.ext; u.v1[3] = v.scale;
 			u.lt[0] = P.L.x; u.lt[1] = P.L.y; u.lt[2] = P.L.z; u.lt[3] = P.ll;
@@ -269,6 +270,7 @@ public:
 			u.k0[0] = o.key; u.k0[1] = o.shadow_key; u.k0[2] = o.mark; u.k0[3] = uint32_t(o.gi_view);
 			u.x0[0] = o.ao_radius; u.x0[1] = o.fog_density / P.zref; u.x0[2] = o.fog_strength; u.x0[3] = P.zref;
 			u.x1[0] = uint32_t(fs); u.x1[1] = uint32_t(fw); u.x1[2] = uint32_t(fh); u.x1[3] = uint32_t(std::max(1, o.fog_steps));
+			u.x2[0] = o.spot_inner; u.x2[1] = o.spot_outer; u.x2[2] = o.spot_dim; u.x2[3] = o.spot_sky;
 			static const unsigned skip = getenv("RT_GPU_SKIP") ? unsigned(strtoul(getenv("RT_GPU_SKIP"), nullptr, 0)) : 0;   // (debugging: kernels left out, a bit each)
 			auto pass = [&](int k, uint32_t threads, const uniforms &uu) {
 				if (!threads || (skip >> k & 1)) return;
