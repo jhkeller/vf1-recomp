@@ -3502,6 +3502,16 @@ int main(int argc, char **argv)
 				else if (e.key.scancode == SDL_SCANCODE_F5) player_scale_to(cfg.scale % 6 + 1);
 				else if (e.key.scancode == SDL_SCANCODE_F6) set_shape((aspect_i + 1) % N_ASPECTS);
 				else if (e.key.scancode == SDL_SCANCODE_F7) { cfg.rt_shadows = !cfg.rt_shadows; apply_rt("Ray-traced shadows", cfg.rt_shadows); }
+				else if (e.key.scancode == SDL_SCANCODE_F8 && (e.key.mod & SDL_KMOD_SHIFT)) {
+					// Shift+F8: global illumination's parts alone, to see them (not saved)
+					static int view = 0;
+					view = (view + 1) % 3;
+					if (view && !cfg.rt_gi) { cfg.rt_gi = true; apply_rt(nullptr, true); }
+					m.set_rt_view(view);
+					redraw_if_stopped();
+					static const char *names[] = { "Lighting view: the picture", "Lighting view: ambient occlusion only", "Lighting view: bounced light only" };
+					menu.toast(names[view], 2);
+				}
 				else if (e.key.scancode == SDL_SCANCODE_F8) { cfg.rt_gi = !cfg.rt_gi; apply_rt("Ray-traced lighting", cfg.rt_gi); }
 				else if (e.key.scancode == SDL_SCANCODE_F10 && !m.rt_recording()) {
 					// F10: the next 2 seconds of ray-traced scenes to RT capture in the data folder (for debugging the ray tracer)

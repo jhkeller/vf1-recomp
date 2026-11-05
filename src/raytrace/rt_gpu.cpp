@@ -35,6 +35,7 @@ struct uniforms   // (rt_gpu.comp's U, std140: all four-word rows)
 	uint32_t g0[4], g1[4];
 	float g2[4];
 	uint32_t k0[4];
+	float x0[4];
 };
 
 inline uint32_t bits(float f) { uint32_t u; memcpy(&u, &f, 4); return u; }
@@ -186,7 +187,7 @@ public:
 			}
 
 			// global illumination's grid (made again when the view's size or place changes)
-			const int g = std::max(2, int(v.scale * 2 + 0.5f));
+			const int g = o.gi_step > 0 ? o.gi_step : std::max(2, int(v.scale * 2 + 0.5f));
 			const int gw = (clip[2] - clip[0]) / g + 1, gh = (clip[3] - clip[1]) / g + 1;
 			grid &G = m_grids[vi];
 			bool grid_new = false;
@@ -243,8 +244,9 @@ public:
 			u.g0[0] = uint32_t(g); u.g0[1] = uint32_t(gw); u.g0[2] = uint32_t(gh); u.g0[3] = uint32_t(std::max(1, o.gi_rays));
 			u.g1[0] = pic; u.g1[1] = uint32_t(clip[0]); u.g1[2] = uint32_t(clip[1]); u.g1[3] = uint32_t(nt);
 			if (!P.accel.nodes.empty()) { const v3 e = P.accel.nodes[0].hi - P.accel.nodes[0].lo; u.g2[0] = std::sqrt(dot(e, e)); }
-			u.g2[1] = o.gi_strength; u.g2[2] = o.ao_strength;
-			u.k0[0] = o.key; u.k0[1] = o.shadow_key; u.k0[2] = o.mark;
+			u.g2[1] = o.gi_strength; u.g2[2] = o.ao_strength; u.g2[3] = o.ao_direct;
+			u.k0[0] = o.key; u.k0[1] = o.shadow_key; u.k0[2] = o.mark; u.k0[3] = uint32_t(o.gi_view);
+			u.x0[0] = o.ao_radius;
 			static const unsigned skip = getenv("RT_GPU_SKIP") ? unsigned(strtoul(getenv("RT_GPU_SKIP"), nullptr, 0)) : 0;   // (debugging: kernels left out, a bit each)
 			auto pass = [&](int k, uint32_t threads, const uniforms &uu) {
 				if (!threads || (skip >> k & 1)) return;

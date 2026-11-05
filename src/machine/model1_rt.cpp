@@ -116,6 +116,11 @@ void model1::rt_end(bitmap_rgb32 &bitmap, const rectangle &cliprect)
 		o.game_shadows = !o.shadows;
 		o.blend_shadows = s_moire_blend;
 		o.key = KEY; o.shadow_key = SHADOW_KEY; o.mark = 0x01000000;   // (model1_video.cpp's MOIRE_MARK)
+		o.gi_view = m_rt_view;
+		if (m_rt_gpu && !m_rt_gpu_failed) {   // (the GPU's quality: a grid point a game pixel, twice the rays)
+			o.gi_step = std::max(1, m_scale);
+			o.gi_rays = 12;
+		}
 		const uint64_t t0 = trace_ns();
 		rt::result r;
 		bool drawn = false;

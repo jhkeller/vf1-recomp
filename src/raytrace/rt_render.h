@@ -34,8 +34,12 @@ struct options
 	bool shadows = false;        // ray-traced shadows
 	bool gi = false;             // ray-traced global illumination (one bounce) and ambient occlusion
 	int gi_rays = 6;             // rays a grid point a picture
-	float gi_strength = 0.6f;    // how much bounced light is added
-	float ao_strength = 0.6f;    // how far ambient occlusion darkens the ambient light (0 none, 1 fully)
+	int gi_step = 0;             // render pixels between grid points (0: twice the render scale)
+	float gi_strength = 1.0f;    // how much bounced light is added
+	float ao_strength = 0.9f;    // how far ambient occlusion darkens the ambient light (0 none, 1 fully)
+	float ao_direct = 0.5f;      // and the direct light, as a share of that (flat-shaded models' creases show it)
+	float ao_radius = 0.3f;      // how near a hit darkens, as a share of the point's depth
+	int gi_view = 0;             // 0 the picture; debugging: 1 ambient occlusion alone (grey), 2 bounced light alone
 	bool game_shadows = true;    // the game's shadow polygons
 	bool blend_shadows = true;   // they halve the pixel beneath (above 1x); false: the arcade's checkerboard
 	uint32_t key = 0xff000000;          // a pixel with nothing under it (the GPU's parts: the 2D goes there later)

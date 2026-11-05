@@ -221,7 +221,7 @@ result render(const scene &s, const target &t, const options &o)
 		if (b.grids.size() < s.views.size()) b.grids.resize(s.views.size());
 		gi_grid &G = b.grids[vi];
 		if (gi) {
-			const int g = std::max(2, int(v.scale * 2 + 0.5f));
+			const int g = o.gi_step > 0 ? o.gi_step : std::max(2, int(v.scale * 2 + 0.5f));
 			const int gw = (clip[2] - clip[0]) / g + 1, gh = (clip[3] - clip[1]) / g + 1;
 			if (G.w != gw || G.h != gh || G.step != g || G.x0 != clip[0] || G.y0 != clip[1]) {
 				G.w = gw; G.h = gh; G.step = g; G.x0 = clip[0]; G.y0 = clip[1];
@@ -256,7 +256,7 @@ result render(const scene &s, const target &t, const options &o)
 						if ((same || like) && ((gx + gy + pic) & 1)) { G.id[gi_] = qi; continue; }   // (its turn next picture)
 						const v3 O = P + N * eps_at(P.z);
 						const float tol = eps_at(P.z);
-						const float near = std::min(0.15f * diag, 0.25f * P.z);
+						const float near = std::min(0.15f * diag, o.ao_radius * P.z);
 						// a frame around N
 						const v3 T = std::fabs(N.x) < 0.9f ? cross(N, v3{ 1, 0, 0 }) : cross(N, v3{ 0, 1, 0 });
 						const v3 Tn = T * (1.0f / std::sqrt(dot(T, T)));
@@ -408,8 +408,9 @@ result render(const scene &s, const target &t, const options &o)
 							// part as lit or not, and the light bounced onto it from round about
 							const v3 amb = rgb_of(q.shade), full = rgb_of(q.lit), alb = rgb_of(q.albedo);
 							const v3 direct = lit ? v3{ std::max(0.0f, full.x - amb.x), std::max(0.0f, full.y - amb.y), std::max(0.0f, full.z - amb.z) } : v3{ 0, 0, 0 };
-							const float occ = 1 - o.ao_strength * (1 - ao);
-							const v3 out = amb * occ + direct + v3{ alb.x * bounce.x, alb.y * bounce.y, alb.z * bounce.z } * o.gi_strength;
+							const float occ = 1 - o.ao_strength * (1 - ao), docc = 1 - o.ao_direct * o.ao_strength * (1 - ao);
+							const v3 add = v3{ alb.x * bounce.x, alb.y * bounce.y, alb.z * bounce.z } * o.gi_strength;
+							const v3 out = o.gi_view == 1 ? v3{ occ, occ, occ } : o.gi_view == 2 ? add : amb * occ + direct * docc + add;
 							c = pack(out);
 						}
 					}

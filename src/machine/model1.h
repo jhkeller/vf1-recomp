@@ -803,6 +803,8 @@ public:
 	// drawn on the CPU, and the CPU's from then on (rt_gpu_failed).
 	void set_rt_gpu(rt::gpu_renderer *g) { m_rt_gpu = g; m_rt_gpu_failed = false; }
 	bool rt_gpu_failed() const { return m_rt_gpu_failed; }
+	// debugging global illumination: 0 the picture, 1 its ambient occlusion alone, 2 its bounced light alone
+	void set_rt_view(int v) { m_rt_view = v; }
 	double rt_ms() const { return m_rt_ms; }
 	void set_gpu3d_on(bool on) { m_gpu3d_on = on; }
 	// The host's renderer is on the 3D's GPU device (SDL's "gpu" renderer): pictures put together in
@@ -1150,6 +1152,7 @@ private:
 	bool m_rt_capture = false;
 	rt::gpu_renderer *m_rt_gpu = nullptr;
 	bool m_rt_gpu_failed = false;
+	int m_rt_view = 0;
 	double m_rt_ms = 0;             // the last picture's ray tracing (its renderer's time)
 	std::string m_rt_rec_dir;       // rt_record's
 	int m_rt_rec_left = 0, m_rt_rec_n = 0;
