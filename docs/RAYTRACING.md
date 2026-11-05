@@ -61,4 +61,16 @@ off for that run.
 `build/bin/rttest [dir]` draws a made-up scene (no ROM) both ways, checks pixels in and out of
 shadow, and writes `rt_raster.ppm` / `rt_shadows.ppm`.
 
+With shadows or lighting on, **F10** in the game records the next 120 scenes the ray tracer draws
+(about 2 seconds) to `RT capture/<n>/scene_NNNN.rts` in the data folder. `build/bin/rttest --scene
+<raster|shadows|gi|both> <out dir> scene_*.rts` draws them again in order, away from the game,
+writing each picture as a PPM and timing each, to chase flicker or speed with the real scenes.
+
+Steadiness: polygons in one plane (a floor and its markings) are drawn in the game's painted order
+whatever their rounded depths, and don't shadow each other; the light's side, decided by the
+polygons' votes, flips only when they're clearly the other way. Speed: shadow rays go from every
+other pixel each way first, and the pixels between ones that agree on the same polygon take their
+answer; global illumination traces half its points each picture (a checkerboard) where the surface
+under them hasn't changed.
+
 Known limits: culled polygons take their palette colour, without the random fighters' recolouring.

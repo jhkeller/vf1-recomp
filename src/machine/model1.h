@@ -796,6 +796,9 @@ public:
 	void set_gpu3d(gpu3d *g) { m_gpu3d = g; }
 	// ray tracing (src/raytrace, model1_rt.cpp): shadows, global illumination; either on, the 3D is the ray-traced renderer's
 	void set_rt(bool shadows, bool gi) { m_rt_shadows = shadows; m_rt_gi = gi; m_rt_capture = m_rt_dump || rt_on(); }
+	// the next `pictures` scenes the ray tracer draws written to `dir` (scene_NNNN.rts, for rttest --scene)
+	void rt_record(const std::string &dir, int pictures) { m_rt_rec_dir = dir; m_rt_rec_left = pictures; m_rt_rec_n = 0; }
+	bool rt_recording() const { return m_rt_rec_left > 0; }
 	void set_gpu3d_on(bool on) { m_gpu3d_on = on; }
 	// The host's renderer is on the 3D's GPU device (SDL's "gpu" renderer): pictures put together in
 	// parts have their 3D drawn straight into its textures (gpu_parts::d3_target), not into frame().
@@ -1140,6 +1143,8 @@ private:
 	bool m_rt_gi = false;        // ray-traced global illumination: light bounced off what's near, and ambient occlusion
 	bool m_rt_dump = false;      // (VF_RT_CAPTURE / VF_RT_DUMP: the capture kept on)
 	bool m_rt_capture = false;
+	std::string m_rt_rec_dir;       // rt_record's
+	int m_rt_rec_left = 0, m_rt_rec_n = 0;
 	bool rt_on() const { return m_rt_raster || m_rt_shadows || m_rt_gi; }
 	rt::scene m_rt_scene;
 	void rt_begin();

@@ -119,6 +119,30 @@ void model1::rt_end(bitmap_rgb32 &bitmap, const rectangle &cliprect)
 		const rt::result r = rt::render(m_rt_scene, t, o);
 		m_raster_ms += (trace_ns() - t0) / 1e6;
 		if (r.mark_y1 <= r.mark_y2) { s_mark_y1 = std::min(s_mark_y1, r.mark_y1); s_mark_y2 = std::max(s_mark_y2, r.mark_y2); }
+
+		// rt_record: the scene as drawn, to replay it away from the game (rttest --scene)
+		if (m_rt_rec_left > 0) {
+			m_rt_rec_left--;
+			char name[32];
+			snprintf(name, sizeof name, "/scene_%04d.rts", m_rt_rec_n++);
+			const std::string path = m_rt_rec_dir + name;
+			if (FILE *f = fopen(path.c_str(), "wb")) {
+				rt::scene_file_header h;
+				h.quads = uint32_t(m_rt_scene.quads.size()); h.views = uint32_t(m_rt_scene.views.size());
+				h.lightparams = uint32_t(m_rt_scene.lightparams.size());
+				h.w = t.w; h.h = t.h; h.cx0 = t.cx0; h.cy0 = t.cy0; h.cx1 = t.cx1; h.cy1 = t.cy1;
+				h.frame = m_rt_scene.frame;
+				fwrite(&h, sizeof h, 1, f);
+				fwrite(m_rt_scene.quads.data(), sizeof(rt::quad), h.quads, f);
+				fwrite(m_rt_scene.views.data(), sizeof(rt::view), h.views, f);
+				fwrite(m_rt_scene.lightparams.data(), sizeof(rt::light_param), h.lightparams, f);
+				fclose(f);
+			} else {
+				fprintf(stderr, "rt: can't write %s\n", path.c_str());
+				m_rt_rec_left = 0;
+			}
+			if (!m_rt_rec_left) fprintf(stderr, "rt: recorded %d scenes to %s\n", m_rt_rec_n, m_rt_rec_dir.c_str());
+		}
 	}
 
 	static const char *dir = getenv("VF_RT_DUMP");

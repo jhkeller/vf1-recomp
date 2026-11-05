@@ -5,6 +5,8 @@
 //   build/bin/rttest [out_dir]
 #include "../src/raytrace/rt_render.h"
 #include <algorithm>
+#include <chrono>
+#include <cstring>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -78,6 +80,10 @@ static int run(const std::string &dir, float sign)
 	// one of the game's shadow polygons, a little over the floor (drawn raster-only: it halves what's under it)
 	const float blob[4][3] = { { -250, -99, 300 }, { -250, -99, 380 }, { -150, -99, 380 }, { -150, -99, 300 } };
 	add_quad(s, blob, 0x000000, 0x000000, MOIRE, 380);
+	// a marking painted on the floor, far off (in the floor's plane: painted later, it must win every pixel,
+	// and the floor under it can't shadow it)
+	const float mark[4][3] = { { 203, -100, 1003 }, { 199, -100, 1297 }, { 283, -100, 1301 }, { 279, -100, 999 } };
+	add_quad(s, mark, 0xe0e0e0, 0x606060, STAGE, 1300);
 
 	target t;
 	std::vector<uint32_t> px(size_t(W) * H, 0x202020);
@@ -101,6 +107,19 @@ static int run(const std::string &dir, float sign)
 		if (got != want) { printf("    wanted %06x\n", want); fails++; }
 	};
 	expect("floor, open", -300, -100, 1200, floor_lit);
+	auto mark_whole = [&](const char *what) {
+		int bad = 0, n = 0;
+		for (float z = 1030; z <= 1270; z += 4)
+			for (float x = 210; x <= 270; x += 2) {
+				int sx, sy;
+				project(x, -100, z, sx, sy);
+				n++;
+				if ((px[size_t(sy) * W + sx] & 0xffffff) != 0xe0e0e0) bad++;
+			}
+		printf("  %-34s %d of %d pixels %s\n", what, n - bad, n, bad ? "WRONG" : "ok");
+		if (bad) fails++;
+	};
+	mark_whole("marking on the floor, every pixel");
 	expect("red box's front", -10, -40, 450, 0xc04040);
 	expect("floor under the game's shadow", -200, -100, 340, (floor_lit >> 1) & 0x7f7f7f);
 
@@ -117,6 +136,7 @@ static int run(const std::string &dir, float sign)
 	expect("floor beside the red box (lit side)", -120, -100, 500, floor_lit);
 	// the floating box's shadow: 140 to 200 over the floor, so 87 to 125 in x, 52 to 75 in z further on
 	expect("floor in the blue box's shadow", 160 + 105, -100, 690 + 63, floor_shade);
+	mark_whole("marking on the floor, lit, every pixel");
 	expect("red box's front", -10, -40, 450, 0xc04040);
 	expect("floor where the game's shadow was", -200, -100, 340, floor_lit);
 
@@ -143,8 +163,53 @@ static int run(const std::string &dir, float sign)
 	return fails;
 }
 
+// rttest --scene <raster|shadows|gi|both> <out dir> scene_0000.rts ...: the scenes the game recorded
+// (F10 in the game) drawn in turn as the game would, each written as a PPM, with the time each took.
+static int replay(int argc, char **argv)
+{
+	if (argc < 5) { fprintf(stderr, "rttest --scene <raster|shadows|gi|both> <out dir> <scene.rts>...\n"); return 2; }
+	const std::string mode = argv[2], out = argv[3];
+	options o;
+	o.shadows = mode == "shadows" || mode == "both";
+	o.gi = mode == "gi" || mode == "both";
+	o.game_shadows = !o.shadows;
+	double total = 0;
+	int n = 0;
+	for (int a = 4; a < argc; a++) {
+		FILE *f = fopen(argv[a], "rb");
+		if (!f) { fprintf(stderr, "can't read %s\n", argv[a]); return 1; }
+		scene_file_header h;
+		scene s;
+		bool ok = fread(&h, sizeof h, 1, f) == 1 && !memcmp(h.magic, "VFRT1", 5) && h.quad_size == sizeof(quad) && h.view_size == sizeof(view);
+		if (ok) {
+			s.quads.resize(h.quads); s.views.resize(h.views); s.lightparams.resize(h.lightparams);
+			ok = fread(s.quads.data(), sizeof(quad), h.quads, f) == h.quads && fread(s.views.data(), sizeof(view), h.views, f) == h.views &&
+			     fread(s.lightparams.data(), sizeof(light_param), h.lightparams, f) == h.lightparams;
+		}
+		fclose(f);
+		if (!ok) { fprintf(stderr, "%s: not a scene this build can read\n", argv[a]); return 1; }
+		std::vector<uint32_t> px(size_t(h.w) * h.h, 0x000000);
+		target t;
+		t.px = px.data(); t.w = h.w; t.h = h.h; t.stride = size_t(h.w);
+		t.cx0 = h.cx0; t.cy0 = h.cy0; t.cx1 = h.cx1; t.cy1 = h.cy1;
+		const auto t0 = std::chrono::steady_clock::now();
+		const result r = render(s, t, o);
+		const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+		total += ms; n++;
+		printf("%s: %ux%u, %u quads, %zu tris, %zu shadow rays (%zu in shadow), %zu gi rays: %.2f ms\n",
+			argv[a], h.w, h.h, h.quads, r.tris, r.rays, r.shadowed, r.gi_rays, ms);
+		for (auto &p : px) p &= 0xffffff;
+		char name[32];
+		snprintf(name, sizeof name, "/%04d.ppm", n - 1);
+		write_ppm(out + name, px, h.w, h.h);
+	}
+	if (n) printf("%d scenes, %.2f ms each on average\n", n, total / n);
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
+	if (argc > 1 && !strcmp(argv[1], "--scene")) return replay(argc, argv);
 	const std::string dir = argc > 1 ? argv[1] : ".";
 	const int fails = run(dir, 1) + run(dir, -1);
 	printf(fails ? "%d WRONG\n" : "all ok\n", fails);

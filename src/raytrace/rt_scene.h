@@ -58,4 +58,14 @@ struct scene
 	void clear() { quads.clear(); views.clear(); }
 };
 
+// A scene to a file and back, with the picture's size and clip (rttest --scene replays it):
+// "VFRT1", then the counts and the arrays as they are in memory (one machine's files, for debugging).
+struct scene_file_header
+{
+	char magic[8] = { 'V', 'F', 'R', 'T', '1', 0, 0, 0 };
+	uint32_t quads = 0, views = 0, lightparams = 0, quad_size = sizeof(quad), view_size = sizeof(view);
+	int32_t w = 0, h = 0, cx0 = 0, cy0 = 0, cx1 = 0, cy1 = 0;
+	uint64_t frame = 0;
+};
+
 } // namespace rt

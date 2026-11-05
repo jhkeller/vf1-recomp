@@ -2517,7 +2517,7 @@ int main(int argc, char **argv)
 							// the game's own keys (pause, reset, the menu's shortcuts, the cabinet's coin and
 							// test buttons) stay theirs: wait for another key
 							static const SDL_Scancode RESERVED[] = { SDL_SCANCODE_P, SDL_SCANCODE_TAB, SDL_SCANCODE_F3,
-								SDL_SCANCODE_F5, SDL_SCANCODE_F6, SDL_SCANCODE_F7, SDL_SCANCODE_F8, SDL_SCANCODE_F9, SDL_SCANCODE_F11, SDL_SCANCODE_F12 };
+								SDL_SCANCODE_F5, SDL_SCANCODE_F6, SDL_SCANCODE_F7, SDL_SCANCODE_F8, SDL_SCANCODE_F9, SDL_SCANCODE_F10, SDL_SCANCODE_F11, SDL_SCANCODE_F12 };
 							for (SDL_Scancode r : RESERVED) if (k == r) return false;
 							for (const auto &sk : SYS_KEYS) if (k == sk.key) return false;
 							// a key does one thing: take it off whatever had it
@@ -3479,6 +3479,20 @@ int main(int argc, char **argv)
 				else if (e.key.scancode == SDL_SCANCODE_F6) set_shape((aspect_i + 1) % N_ASPECTS);
 				else if (e.key.scancode == SDL_SCANCODE_F7) { cfg.rt_shadows = !cfg.rt_shadows; apply_rt("Ray-traced shadows", cfg.rt_shadows); }
 				else if (e.key.scancode == SDL_SCANCODE_F8) { cfg.rt_gi = !cfg.rt_gi; apply_rt("Ray-traced lighting", cfg.rt_gi); }
+				else if (e.key.scancode == SDL_SCANCODE_F10 && !m.rt_recording()) {
+					// F10: the next 2 seconds of ray-traced scenes to RT capture in the data folder (for debugging the ray tracer)
+					if (!cfg.rt_shadows && !cfg.rt_gi) menu.toast("Turn on ray-traced shadows (F7) or lighting (F8) first", 3);
+					else {
+						std::error_code ec;
+						int k = 1;
+						std::string out;
+						do out = dir + "/RT capture/" + std::to_string(k++);
+						while (std::filesystem::exists(out, ec) && k < 1000);
+						std::filesystem::create_directories(out, ec);
+						m.rt_record(out, 120);
+						menu.toast("Recording ray-traced scenes (2 seconds)", 3);
+					}
+				}
 				else if (e.key.scancode == SDL_SCANCODE_F12) {
 					// F12: the picture as drawn, into Screenshots in the data folder (numbered, never overwritten)
 					std::error_code ec;
