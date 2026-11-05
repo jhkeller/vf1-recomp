@@ -15,6 +15,9 @@
 #include "gpu_compose.h"
 #include "controls.h"
 #include "../machine/parallel.h"
+#if VF_GPU3D_SDL
+#include "../raytrace/rt_gpu.h"
+#endif
 #include "../rt/rec_rt.h"
 #ifdef VF_NATIVE
 #include "../rt/native.h"
@@ -1617,6 +1620,26 @@ int main(int argc, char **argv)
 		cfg.auto_3d = out + (out.empty() ? "" : ",") + k + (gpu ? "g" : "c");
 	};
 	auto apply_3d = [&] { m.set_gpu3d_on(g3 && !a3.broken && a3.gpu); m.m_gpu3d_chosen = cfg.renderer3d == 1; };
+	// Ray-traced lighting on the GPU (src/raytrace/rt_gpu.h: Vulkan, a device of its own), made the
+	// first time it's turned on; none (no Vulkan here, or VF_RT_CPU=1): on the CPU.
+#if VF_GPU3D_SDL
+	std::unique_ptr<rt::gpu_renderer> rt_gpu;
+	bool rt_gpu_tried = false;
+#endif
+	auto rt_gpu_ready = [&] {
+#if VF_GPU3D_SDL
+		if ((cfg.rt_shadows || cfg.rt_gi) && !rt_gpu_tried && !getenv("VF_RT_CPU")) {
+			rt_gpu_tried = true;
+			rt_gpu = rt::gpu_create();
+			fprintf(stderr, "ray-traced lighting: %s\n", rt_gpu ? rt_gpu->name() : "on the CPU (no Vulkan device for it)");
+			m.set_rt_gpu(rt_gpu.get());
+		}
+		return rt_gpu != nullptr && !m.rt_gpu_failed();
+#else
+		return false;
+#endif
+	};
+	rt_gpu_ready();
 	m.set_rt(cfg.rt_shadows, cfg.rt_gi);
 	auto renderer_name = [&]() -> std::string {
 #if VF_GPU3D_METAL
@@ -2065,10 +2088,11 @@ int main(int argc, char **argv)
 	auto redraw_if_stopped = [&] { if (paused || menu.is_open()) { m.set_stopped(true); m.redraw(); m.set_stopped(false); still_dirty = true; } };
 	// ray tracing on or off (Display > Ray-traced shadows / lighting, F7 / F8)
 	auto apply_rt = [&](const char *what, bool on) {
+		const bool gpu = rt_gpu_ready();
 		m.set_rt(cfg.rt_shadows, cfg.rt_gi);
 		cfg_dirty = true;
 		redraw_if_stopped();
-		if (what) menu.toast(std::string(what) + (on ? ": on" : ": off"), 2);
+		if (what) menu.toast(std::string(what) + (on ? (gpu ? ": on (GPU)" : ": on (CPU)") : ": off"), 2);
 	};
 	// Reset (the menu, F3): the menu closes, a paused game unpauses, and the screen goes black at
 	// once while the boot runs unseen (a few seconds on a slow machine), not the last picture held.

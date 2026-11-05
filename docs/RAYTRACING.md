@@ -54,8 +54,7 @@ Code: `src/raytrace/rt_render.cpp` (`rt::render`), called from `model1::rt_end`.
 polygons are drawn with a depth buffer in the game's paint order; each lit pixel then sends a ray
 toward the game's light through a BVH of every polygon in its viewport, culled ones included. A
 pixel in shadow takes the colour the game would give it with only the ambient light (captured per
-polygon as `rt::quad::shade`). It runs on the CPU, threaded by rows, so keep the render scale
-modest (2x or 3x) for now; the GPU compute port is the next step. `VF_RT` turns the GPU 3D renderer
+polygon as `rt::quad::shade`). It runs on the GPU where Vulkan is there (below), else on the CPU, threaded by rows. `VF_RT` turns the GPU 3D renderer
 off for that run.
 
 `build/bin/rttest [dir]` draws a made-up scene (no ROM) both ways, checks pixels in and out of
@@ -74,3 +73,20 @@ answer; global illumination traces half its points each picture (a checkerboard)
 under them hasn't changed.
 
 Known limits: culled polygons take their palette colour, without the random fighters' recolouring.
+
+## On the GPU
+
+`src/raytrace/rt_gpu.cpp` draws the same picture with compute kernels (`rt_gpu.comp`, GLSL, built
+into `rt_gpu_shaders.h` by `tools/gpu/rt_shaders.sh` with glslang: the builds don't need it) on a
+Vulkan device of its own through SDL_GPU. The CPU still makes each view ready
+(`rt::detail::prepare`: polygons in painted order and projected, their planes, the BVH, the light's
+side) and lists each triangle's rows; the GPU rasters them (an atomic maximum of depth, then which
+triangle is nearest, then the last painted of those level with it or in its plane), traces the
+global illumination grid and the shadows, and colours each pixel; the result comes back into the
+picture. The game makes it the first time ray tracing is turned on; the toast says GPU or CPU. No
+Vulkan, a failed picture (the CPU from then on), or `VF_RT_CPU=1`: the CPU's.
+
+`make build/bin/rttest-gpu` runs rttest's checks (and `--scene`) on it; with Mesa's lavapipe it runs
+without a graphics card. Raster and shadows come out pixel for pixel as the CPU's; global
+illumination differs only by its noise. Debugging: `RT_GPU_SKIP=<bits>` leaves kernels out,
+`RT_GPU_SPV_DIR=build/shaders/rt` loads freshly built kernels without rebuilding.

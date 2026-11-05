@@ -799,6 +799,11 @@ public:
 	// the next `pictures` scenes the ray tracer draws written to `dir` (scene_NNNN.rts, for rttest --scene)
 	void rt_record(const std::string &dir, int pictures) { m_rt_rec_dir = dir; m_rt_rec_left = pictures; m_rt_rec_n = 0; }
 	bool rt_recording() const { return m_rt_rec_left > 0; }
+	// ray-traced lighting drawn by the GPU (rt_gpu.h; null: the CPU's). A picture it can't draw is
+	// drawn on the CPU, and the CPU's from then on (rt_gpu_failed).
+	void set_rt_gpu(rt::gpu_renderer *g) { m_rt_gpu = g; m_rt_gpu_failed = false; }
+	bool rt_gpu_failed() const { return m_rt_gpu_failed; }
+	double rt_ms() const { return m_rt_ms; }
 	void set_gpu3d_on(bool on) { m_gpu3d_on = on; }
 	// The host's renderer is on the 3D's GPU device (SDL's "gpu" renderer): pictures put together in
 	// parts have their 3D drawn straight into its textures (gpu_parts::d3_target), not into frame().
@@ -1143,6 +1148,9 @@ private:
 	bool m_rt_gi = false;        // ray-traced global illumination: light bounced off what's near, and ambient occlusion
 	bool m_rt_dump = false;      // (VF_RT_CAPTURE / VF_RT_DUMP: the capture kept on)
 	bool m_rt_capture = false;
+	rt::gpu_renderer *m_rt_gpu = nullptr;
+	bool m_rt_gpu_failed = false;
+	double m_rt_ms = 0;             // the last picture's ray tracing (its renderer's time)
 	std::string m_rt_rec_dir;       // rt_record's
 	int m_rt_rec_left = 0, m_rt_rec_n = 0;
 	bool rt_on() const { return m_rt_raster || m_rt_shadows || m_rt_gi; }

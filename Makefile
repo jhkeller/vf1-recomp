@@ -182,8 +182,10 @@ GPU3D_LIBS = -framework Metal -framework Foundation -framework QuartzCore
 GPU3D_DEF = -DVF_GPU3D_METAL=1
 endif
 ifeq ($(GPU3D),sdlgpu)
-GPU3D_OBJ = $(OBJ)/src/gpu/gpu3d_sdlgpu.o
-$(OBJ)/src/gpu/gpu3d_sdlgpu.o: CXXFLAGS += $(SDL_CFLAGS)
+# (with ray-traced lighting's GPU renderer: src/raytrace/rt_gpu.cpp, Vulkan, its kernels precompiled in
+# rt_gpu_shaders.h by tools/gpu/rt_shaders.sh)
+GPU3D_OBJ = $(OBJ)/src/gpu/gpu3d_sdlgpu.o $(OBJ)/src/raytrace/rt_gpu.o
+$(OBJ)/src/gpu/gpu3d_sdlgpu.o $(OBJ)/src/raytrace/rt_gpu.o: CXXFLAGS += $(SDL_CFLAGS)
 GPU3D_DEF = -DVF_GPU3D_SDL=1
 endif
 $(OBJ)/%.o: %.mm
@@ -230,3 +232,8 @@ clean:
 $(BIN)/rttest: $(call objs,tools/rt_test.cpp src/raytrace/rt_render.cpp)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $^ -o $@ -lpthread
+# The same on the GPU's renderer (Vulkan through SDL_GPU; a software one, lavapipe, does): build/bin/rttest-gpu
+# [out_dir], or --scene as rttest. Each picture's pixels as the CPU's but global illumination's noise.
+$(BIN)/rttest-gpu: tools/rt_test.cpp src/raytrace/rt_render.cpp src/raytrace/rt_gpu.cpp src/raytrace/*.h
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(SDL_CFLAGS) -DRT_TEST_GPU tools/rt_test.cpp src/raytrace/rt_render.cpp src/raytrace/rt_gpu.cpp -o $@ $(SDL_LIBS) -lpthread

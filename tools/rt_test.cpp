@@ -4,9 +4,15 @@
 // shadows takes its shadow colour, the floor away from them stays lit, and the near box hides the far one.
 //   build/bin/rttest [out_dir]
 #include "../src/raytrace/rt_render.h"
+#ifdef RT_TEST_GPU
+#include "../src/raytrace/rt_gpu.h"
+#include <SDL3/SDL.h>
+#include <memory>
+#endif
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <functional>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -60,7 +66,10 @@ static void write_ppm(const std::string &path, const std::vector<uint32_t> &px, 
 	fclose(f);
 }
 
-static int run(const std::string &dir, float sign)
+// draws a picture: the CPU's renderer, or (rttest-gpu) the GPU's
+using draw_fn = std::function<result(const scene &, const target &, const options &)>;
+
+static int run(const std::string &dir, float sign, const draw_fn &draw)
 {
 	g_normal_sign = sign;
 	printf("normals %s the models:\n", sign > 0 ? "out of" : "into");
@@ -90,7 +99,7 @@ static int run(const std::string &dir, float sign)
 	t.px = px.data(); t.w = W; t.h = H; t.stride = W; t.cx0 = 0; t.cy0 = 0; t.cx1 = W - 1; t.cy1 = H - 1;
 
 	options o;
-	result r = render(s, t, o);
+	result r = draw(s, t, o);
 	write_ppm(dir + "/rt_raster.ppm", px, W, H);
 	printf("raster: %zu triangles\n", r.tris);
 
@@ -126,7 +135,7 @@ static int run(const std::string &dir, float sign)
 	std::fill(px.begin(), px.end(), 0x202020);
 	o.shadows = true;
 	o.game_shadows = false;
-	r = render(s, t, o);
+	r = draw(s, t, o);
 	write_ppm(dir + "/rt_shadows.ppm", px, W, H);
 	printf("shadows: %zu rays, %zu in shadow\n", r.rays, r.shadowed);
 	// the red box's shadow falls from its top (y 20, 120 over the floor) away from the light: +x, +z
@@ -145,9 +154,6 @@ static int run(const std::string &dir, float sign)
 	s.lightparams.assign(256, light_param{ 0.4f, 0.6f, 0, 0 });
 	o.gi = true;
 	o.gi_rays = 32;
-	for (int k = 0; k < 8; k++) { std::fill(px.begin(), px.end(), 0x202020); r = render(s, t, o); }
-	write_ppm(dir + "/rt_gi.ppm", px, W, H);
-	printf("gi: %zu rays a picture\n", r.gi_rays);
 	auto at = [&](float x, float y, float z) { int sx, sy; project(x, y, z, sx, sy); return px[size_t(sy) * W + sx] & 0xffffff; };
 	auto r8 = [](uint32_t c) { return int((c >> 16) & 255); };
 	auto lum = [](uint32_t c) { return int((c >> 16) & 255) + int((c >> 8) & 255) + int(c & 255); };
@@ -155,9 +161,19 @@ static int run(const std::string &dir, float sign)
 		printf("  %-34s %06x vs %06x %s\n", what, a, b, ok ? "ok" : "WRONG");
 		if (!ok) fails++;
 	};
+	// (the occlusion alone first: no bounced light)
+	o.gi_strength = 0;
+	for (int k = 0; k < 8; k++) { std::fill(px.begin(), px.end(), 0x202020); r = draw(s, t, o); }
 	{
 		const uint32_t foot = at(-80, -100, 470), open = at(-300, -100, 1200);
 		check("floor at the box's foot darker (AO)", lum(foot) < lum(open), foot, open);
+	}
+	o.gi_strength = options().gi_strength;
+	for (int k = 0; k < 8; k++) { std::fill(px.begin(), px.end(), 0x202020); r = draw(s, t, o); }
+	write_ppm(dir + "/rt_gi.ppm", px, W, H);
+	printf("gi: %zu rays a picture\n", r.gi_rays);
+	{
+		const uint32_t foot = at(-80, -100, 470), open = at(-300, -100, 1200);
 		check("floor at the box's foot redder (bounce)", r8(foot) > r8(open), foot, open);
 	}
 	return fails;
@@ -165,7 +181,7 @@ static int run(const std::string &dir, float sign)
 
 // rttest --scene <raster|shadows|gi|both> <out dir> scene_0000.rts ...: the scenes the game recorded
 // (F10 in the game) drawn in turn as the game would, each written as a PPM, with the time each took.
-static int replay(int argc, char **argv)
+static int replay(int argc, char **argv, const draw_fn &draw)
 {
 	if (argc < 5) { fprintf(stderr, "rttest --scene <raster|shadows|gi|both> <out dir> <scene.rts>...\n"); return 2; }
 	const std::string mode = argv[2], out = argv[3];
@@ -193,7 +209,7 @@ static int replay(int argc, char **argv)
 		t.px = px.data(); t.w = h.w; t.h = h.h; t.stride = size_t(h.w);
 		t.cx0 = h.cx0; t.cy0 = h.cy0; t.cx1 = h.cx1; t.cy1 = h.cy1;
 		const auto t0 = std::chrono::steady_clock::now();
-		const result r = render(s, t, o);
+		const result r = draw(s, t, o);
 		const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 		total += ms; n++;
 		printf("%s: %ux%u, %u quads, %zu tris, %zu shadow rays (%zu in shadow), %zu gi rays: %.2f ms\n",
@@ -209,9 +225,23 @@ static int replay(int argc, char **argv)
 
 int main(int argc, char **argv)
 {
-	if (argc > 1 && !strcmp(argv[1], "--scene")) return replay(argc, argv);
+	draw_fn draw = [](const scene &s, const target &t, const options &o) { return render(s, t, o); };
+#ifdef RT_TEST_GPU
+	// rttest-gpu: the GPU's renderer (a Vulkan device: SDL's offscreen video driver, no window)
+	SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen");
+	if (!SDL_Init(SDL_INIT_VIDEO)) { fprintf(stderr, "SDL: %s\n", SDL_GetError()); return 1; }
+	std::unique_ptr<gpu_renderer> gpu = gpu_create();
+	if (!gpu) { fprintf(stderr, "no GPU renderer here\n"); return 1; }
+	printf("GPU: %s\n", gpu->name());
+	draw = [&](const scene &s, const target &t, const options &o) {
+		result r;
+		if (!gpu->render(s, t, o, r)) { fprintf(stderr, "the GPU didn't draw it\n"); exit(1); }
+		return r;
+	};
+#endif
+	if (argc > 1 && !strcmp(argv[1], "--scene")) return replay(argc, argv, draw);
 	const std::string dir = argc > 1 ? argv[1] : ".";
-	const int fails = run(dir, 1) + run(dir, -1);
+	const int fails = run(dir, 1, draw) + run(dir, -1, draw);
 	printf(fails ? "%d WRONG\n" : "all ok\n", fails);
 	return fails ? 1 : 0;
 }

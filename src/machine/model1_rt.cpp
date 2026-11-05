@@ -13,6 +13,7 @@
 // origin looking down -z; each viewport is its own group, and culled polygons a group of their own.
 #include "model1.h"
 #include "../raytrace/rt_render.h"
+#include "../raytrace/rt_gpu.h"
 #include <glm/geometric.hpp>
 #include <cstdio>
 #include <map>
@@ -116,8 +117,15 @@ void model1::rt_end(bitmap_rgb32 &bitmap, const rectangle &cliprect)
 		o.blend_shadows = s_moire_blend;
 		o.key = KEY; o.shadow_key = SHADOW_KEY; o.mark = 0x01000000;   // (model1_video.cpp's MOIRE_MARK)
 		const uint64_t t0 = trace_ns();
-		const rt::result r = rt::render(m_rt_scene, t, o);
-		m_raster_ms += (trace_ns() - t0) / 1e6;
+		rt::result r;
+		bool drawn = false;
+		if (m_rt_gpu && !m_rt_gpu_failed) {
+			drawn = m_rt_gpu->render(m_rt_scene, t, o, r);
+			if (!drawn) { m_rt_gpu_failed = true; fprintf(stderr, "rt: the GPU couldn't draw a picture: on the CPU from now on\n"); }
+		}
+		if (!drawn) r = rt::render(m_rt_scene, t, o);
+		m_rt_ms = (trace_ns() - t0) / 1e6;
+		m_raster_ms += m_rt_ms;
 		if (r.mark_y1 <= r.mark_y2) { s_mark_y1 = std::min(s_mark_y1, r.mark_y1); s_mark_y2 = std::max(s_mark_y2, r.mark_y2); }
 
 		// rt_record: the scene as drawn, to replay it away from the game (rttest --scene)

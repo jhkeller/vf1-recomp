@@ -11,6 +11,8 @@
 
 namespace rt {
 
+class gpu_renderer;   // (rt_gpu.h)
+
 enum flag : uint8_t
 {
 	MOIRE = 1,        // one of the game's shadow polygons (a ray-traced picture leaves them out)
