@@ -156,6 +156,31 @@ bool prepare(const scene &s, size_t vi, const target &t, const options &o, std::
 	}
 	p.ll = std::sqrt(lx * lx + ly * ly + lz * lz);
 	p.L = p.ll > 0 ? v3{ lx / p.ll, ly / p.ll, lz / p.ll } : v3{ 0, 1, 0 };
+	// the floor (for the spotlight): the polygons facing the light's way, by area, their normal; its
+	// height the median of theirs that face that way
+	{
+		v3 sum{ 0, 0, 0 };
+		for (int32_t k : p.order) {
+			const quad &q = s.quads[k];
+			const v3 c0 = corner(q, 0);
+			const v3 a = cross(corner(q, 1) - c0, corner(q, 2) - c0) + cross(corner(q, 2) - c0, corner(q, 3) - c0);   // (twice the area along the normal)
+			const float al = dot(a, p.L), len = std::sqrt(dot(a, a));
+			if (len <= 0 || std::fabs(al) < 0.5f * len) continue;
+			sum = sum + (al < 0 ? a * -1.0f : a);
+		}
+		const float sl = std::sqrt(dot(sum, sum));
+		p.up = sl > 0 ? sum * (1.0f / sl) : p.L;
+		std::vector<float> hs;
+		for (int32_t k : p.order) {
+			const float *pl = &planes[size_t(k) * 4];
+			if (std::fabs(pl[0] * p.up.x + pl[1] * p.up.y + pl[2] * p.up.z) < 0.98f) continue;
+			const quad &q = s.quads[k];
+			v3 c{ 0, 0, 0 };
+			for (int i = 0; i < 4; i++) c = c + corner(q, i) * 0.25f;
+			hs.push_back(dot(c, p.up));
+		}
+		if (!hs.empty()) { std::nth_element(hs.begin(), hs.begin() + hs.size() / 2, hs.end()); p.floor = hs[hs.size() / 2]; }
+	}
 	return true;
 }
 

@@ -307,6 +307,8 @@ struct prepared
 	v3 L{ 0, 1, 0 };                     // toward the light (unit)
 	float ll = 0;                        // the light vector's length (0: no light)
 	float zref = 1;                      // the view's typical depth (its drawn polygons' median)
+	v3 up{ 0, 1, 0 };                    // the floor's normal, on the light's side (unit)
+	float floor = 0;                     // the floor's height along it
 };
 // false: nothing of this view to draw. planes: a polygon's plane (unit normal, offset), 4 floats a
 // polygon, by its place in s.quads (this view's filled); light_sign: the view's kept light side.

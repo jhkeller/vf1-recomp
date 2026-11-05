@@ -48,6 +48,8 @@ layout(std140, set = 2, binding = 0) uniform U
 	vec4 x0;    // ao radius (a share of the depth), haze density (per unit of depth), haze brightness, the view's typical depth
 	uvec4 x1;   // haze grid step, w, h, steps a ray
 	vec4 x2;    // spotlight: full light out to, the least past (shares of the typical depth from its axis), the ambient outside, the direct light outside
+	vec4 x3;    // spotlight: the floor's normal (up), its height along it
+	vec4 x4;    // spotlight: the light's height over the floor, the height lit fully
 };
 #define AO_RADIUS x0.x
 #define STRIDE u0.x
@@ -209,16 +211,21 @@ vec3 place(float sx, float sy, float depth)
 	const float z = 1.0 / depth;
 	return vec3((sx / v1.w - v1.z - v0.x - v1.x) / v0.z * z, (v0.y - sy / v1.w - v1.y) / v0.w * z, z);
 }
-// The spotlight's direct light at a point (1 on its axis, its edge share outside): its axis the light's direction through
-// the view's centre at its typical depth
-float spot_at(vec3 P)
+// The spotlight at a point: x its cone (1 on its axis, its edge share outside), y the light there
+// (on what isn't floor, less further below the light than the height lit fully: a point light over
+// the floor at the view's centre, shining straight down)
+vec2 spot_of(vec3 P, bool floor_)
 {
-	if ((FLAGS & F_SPOT) == 0u) return 1.0;
+	if ((FLAGS & F_SPOT) == 0u) return vec2(1.0);
 	const vec3 C = place(0.5 * float(CX0 + CX1 + 1), 0.5 * float(CY0 + CY1 + 1), 1.0 / x0.w);
-	const vec3 d = P - C, L = lt.xyz;
-	const float r = length(d - L * dot(d, L)) / x0.w;
-	return mix(1.0, x2.w, smoothstep(x2.x, x2.y, r));
+	const vec3 d = P - C, U = x3.xyz;
+	const float H = x4.x, below = max(H - (dot(P, U) - x3.w), 0.2 * H);   // (the light's height over the point)
+	const float r = length(d - U * dot(d, U)) / x0.w * H / below;          // (the cone widening toward the floor)
+	const float cone = mix(1.0, x2.w, smoothstep(x2.x, x2.y, r));
+	const float full = H - x4.y;
+	return vec2(cone, floor_ ? cone : cone * clamp(full * full / (below * below), 0.45, 1.0));
 }
+float spot_at(vec3 P) { return spot_of(P, true).y; }
 vec3 facing(uint q, vec3 toward)
 {
 	const vec3 n = plane_of(q).xyz;
@@ -538,8 +545,9 @@ void main()
 		const uint qlit = QUADS[q * 8u], qshade = QUADS[q * 8u + 1u];
 		uint c = lit ? qlit : qshade;
 		// the spotlight: the direct light by it, the ambient down to its share outside the pool
-		const float spot = spot_at(place(float(x) + 0.5, float(y) + 0.5, fl(DEPTH[i])));
-		const float sa = mix(x2.z, 1.0, (spot - x2.w) / max(1e-4, 1.0 - x2.w));
+		const vec2 so = spot_of(place(float(x) + 0.5, float(y) + 0.5, fl(DEPTH[i])), abs(dot(plane_of(q).xyz, x3.xyz)) > 0.98);
+		const float spot = so.y;
+		const float sa = mix(x2.z, 1.0, (so.x - x2.w) / max(1e-4, 1.0 - x2.w));
 		if ((FLAGS & F_SPOT) != 0u) {
 			const vec3 amb = rgb_of(qshade);
 			c = pack_rgb(amb * sa + (lit ? max(rgb_of(qlit) - amb, vec3(0)) * spot : vec3(0)));

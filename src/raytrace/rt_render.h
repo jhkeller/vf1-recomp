@@ -48,6 +48,8 @@ struct options
 	float spot_outer = 1.0f;     // and the edge share past this
 	float spot_dim = 0.8f;       // the ambient light outside the pool, as a share of the game's
 	float spot_edge = 0.55f;     // the direct light outside the pool, as a share of the game's (the sky's as it was)
+	float spot_height = 1.2f;    // the spotlight's height over the floor (a share of the typical depth): further from it, less light
+	float spot_head = 0.3f;      // the height (that share) lit fully: what isn't floor below it darker, the fighters' legs
 	int gi_view = 0;             // 0 the picture; debugging: 1 ambient occlusion alone (grey), 2 bounced light alone
 	bool game_shadows = true;    // the game's shadow polygons
 	bool blend_shadows = true;   // they halve the pixel beneath (above 1x); false: the arcade's checkerboard

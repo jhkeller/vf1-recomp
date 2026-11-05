@@ -115,8 +115,8 @@ void model1::rt_end(bitmap_rgb32 &bitmap, const rectangle &cliprect)
 		o.gi = m_rt_gi;
 		o.fog = m_rt_fog;
 		o.spot = m_rt_spot;
-		if (const char *e = getenv("VF_RT_SPOT"))   // (tuning: inner,outer,dim,edge)
-			sscanf(e, "%f,%f,%f,%f", &o.spot_inner, &o.spot_outer, &o.spot_dim, &o.spot_edge);
+		if (const char *e = getenv("VF_RT_SPOT"))   // (tuning: inner,outer,dim,edge,height,head)
+			sscanf(e, "%f,%f,%f,%f,%f,%f", &o.spot_inner, &o.spot_outer, &o.spot_dim, &o.spot_edge, &o.spot_height, &o.spot_head);
 		o.game_shadows = !o.shadows;
 		o.blend_shadows = s_moire_blend;
 		o.key = KEY; o.shadow_key = SHADOW_KEY; o.mark = 0x01000000;   // (model1_video.cpp's MOIRE_MARK)
