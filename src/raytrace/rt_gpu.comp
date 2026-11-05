@@ -47,7 +47,7 @@ layout(std140, set = 2, binding = 0) uniform U
 	uvec4 k0;   // key, shadow key, mark, view (0 the picture; 1 ambient occlusion alone, 2 bounced light alone)
 	vec4 x0;    // ao radius (a share of the depth), haze density (per unit of depth), haze brightness, the view's typical depth
 	uvec4 x1;   // haze grid step, w, h, steps a ray
-	vec4 x2;    // spotlight: full light out to, none past (shares of the typical depth from its axis), the ambient outside, the sky's brightness
+	vec4 x2;    // spotlight: full light out to, the least past (shares of the typical depth from its axis), the ambient outside, the direct light outside
 };
 #define AO_RADIUS x0.x
 #define STRIDE u0.x
@@ -209,7 +209,7 @@ vec3 place(float sx, float sy, float depth)
 	const float z = 1.0 / depth;
 	return vec3((sx / v1.w - v1.z - v0.x - v1.x) / v0.z * z, (v0.y - sy / v1.w - v1.y) / v0.w * z, z);
 }
-// The spotlight's light at a point (1 on its axis, 0 outside): its axis the light's direction through
+// The spotlight's direct light at a point (1 on its axis, its edge share outside): its axis the light's direction through
 // the view's centre at its typical depth
 float spot_at(vec3 P)
 {
@@ -217,7 +217,7 @@ float spot_at(vec3 P)
 	const vec3 C = place(0.5 * float(CX0 + CX1 + 1), 0.5 * float(CY0 + CY1 + 1), 1.0 / x0.w);
 	const vec3 d = P - C, L = lt.xyz;
 	const float r = length(d - L * dot(d, L)) / x0.w;
-	return 1.0 - smoothstep(x2.x, x2.y, r);
+	return mix(1.0, x2.w, smoothstep(x2.x, x2.y, r));
 }
 vec3 facing(uint q, vec3 toward)
 {
@@ -539,7 +539,7 @@ void main()
 		uint c = lit ? qlit : qshade;
 		// the spotlight: the direct light by it, the ambient down to its share outside the pool
 		const float spot = spot_at(place(float(x) + 0.5, float(y) + 0.5, fl(DEPTH[i])));
-		const float sa = mix(x2.z, 1.0, spot);
+		const float sa = mix(x2.z, 1.0, (spot - x2.w) / max(1e-4, 1.0 - x2.w));
 		if ((FLAGS & F_SPOT) != 0u) {
 			const vec3 amb = rgb_of(qshade);
 			c = pack_rgb(amb * sa + (lit ? max(rgb_of(qlit) - amb, vec3(0)) * spot : vec3(0)));
@@ -584,12 +584,9 @@ void main()
 			res = 0x80000000u | (QUADS[quad_of_tri(m - 1u) * 8u] & 0xffffffu);
 	}
 	// the haze over the sky (the CPU's picture there): what it lets through and adds, 12 bits each
-	// (with the spotlight: the sky dimmed)
-	if (res == 0u && (FLAGS & (F_FOG | F_SPOT)) != 0u && OUT[i] == 0u) {
-		float sc = 0.0, th = 1.0;
-		const bool fogged = (FLAGS & F_FOG) != 0u && fog_at(x, y, -1.0, sc, th);
-		if ((FLAGS & F_SPOT) != 0u) th *= x2.w;
-		if (fogged || (FLAGS & F_SPOT) != 0u)
+	if (res == 0u && (FLAGS & F_FOG) != 0u && OUT[i] == 0u) {
+		float sc, th;
+		if (fog_at(x, y, -1.0, sc, th))
 			res = 0x20000000u | (uint(clamp(th, 0.0, 1.0) * 4095.0 + 0.5) << 12) | uint(clamp(sc * 0.25, 0.0, 1.0) * 4095.0 + 0.5);
 	}
 	if (res != 0u) OUT[i] = res;

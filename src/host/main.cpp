@@ -2228,7 +2228,7 @@ int main(int argc, char **argv)
 			[&] { return on_off(cfg.rt_fog); },
 			[&](int) { cfg.rt_fog = !cfg.rt_fog; apply_rt(nullptr, cfg.rt_fog); } });
 		p.items.push_back({ "Spotlight",
-			"The light as a spotlight on the fight: full in a pool around the middle of the screen, falling off to darker edges and a dimmer sky. With volumetric lighting, its beam shows in the haze. On the GPU (Vulkan) only. (Shift+F4)",
+			"The light as a spotlight on the fight: full in a pool around the middle of the screen, falling off gently toward the edges (the sky as it was). With volumetric lighting, its beam shows in the haze. On the GPU (Vulkan) only. (Shift+F4)",
 			[&] { return on_off(cfg.rt_spot); },
 			[&](int) { cfg.rt_spot = !cfg.rt_spot; apply_rt(nullptr, cfg.rt_spot); } });
 		p.items.push_back({ "Picture shape",

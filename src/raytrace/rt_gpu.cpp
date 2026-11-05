@@ -270,7 +270,7 @@ public:
 			u.k0[0] = o.key; u.k0[1] = o.shadow_key; u.k0[2] = o.mark; u.k0[3] = uint32_t(o.gi_view);
 			u.x0[0] = o.ao_radius; u.x0[1] = o.fog_density / P.zref; u.x0[2] = o.fog_strength; u.x0[3] = P.zref;
 			u.x1[0] = uint32_t(fs); u.x1[1] = uint32_t(fw); u.x1[2] = uint32_t(fh); u.x1[3] = uint32_t(std::max(1, o.fog_steps));
-			u.x2[0] = o.spot_inner; u.x2[1] = o.spot_outer; u.x2[2] = o.spot_dim; u.x2[3] = o.spot_sky;
+			u.x2[0] = o.spot_inner; u.x2[1] = o.spot_outer; u.x2[2] = o.spot_dim; u.x2[3] = o.spot_edge;
 			static const unsigned skip = getenv("RT_GPU_SKIP") ? unsigned(strtoul(getenv("RT_GPU_SKIP"), nullptr, 0)) : 0;   // (debugging: kernels left out, a bit each)
 			auto pass = [&](int k, uint32_t threads, const uniforms &uu) {
 				if (!threads || (skip >> k & 1)) return;
