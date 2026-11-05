@@ -50,6 +50,7 @@ layout(std140, set = 2, binding = 0) uniform U
 	vec4 x2;    // spotlight: full light out to, the least past (shares of the typical depth from its axis), the ambient outside, the direct light outside
 	vec4 x3;    // spotlight: the floor's normal (up), its height along it
 	vec4 x4;    // spotlight: the light's height over the floor, the height lit fully
+	vec4 x5;    // spotlight: the sky's colour, how far the light outside the pool takes it
 };
 #define AO_RADIUS x0.x
 #define STRIDE u0.x
@@ -563,6 +564,13 @@ void main()
 				const vec3 add = alb * bounce * g2.y;
 				c = pack_rgb(k0.w == 1u ? vec3(occ) : k0.w == 2u ? add : (amb * occ + add) * sa + direct * docc * spot);
 			}
+		}
+		// outside the pool the light the sky's colour (a share, the brightness kept)
+		if ((FLAGS & F_SPOT) != 0u && x5.w > 0.0) {
+			const vec3 sky = x5.rgb / max(1e-3, max(x5.r, max(x5.g, x5.b)));
+			vec3 tint = mix(vec3(1.0), sky, x5.w * clamp((1.0 - so.x) / max(1e-4, 1.0 - x2.w), 0.0, 1.0));
+			tint /= max(1e-3, dot(tint, vec3(0.299, 0.587, 0.114)));
+			c = pack_rgb(rgb_of(c) * tint);
 		}
 		if ((FLAGS & F_FOG) != 0u) {
 			const vec3 P = place(float(x) + 0.5, float(y) + 0.5, fl(DEPTH[i]));

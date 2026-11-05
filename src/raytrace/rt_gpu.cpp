@@ -37,7 +37,7 @@ struct uniforms   // (rt_gpu.comp's U, std140: all four-word rows)
 	uint32_t k0[4];
 	float x0[4];
 	uint32_t x1[4];
-	float x2[4], x3[4], x4[4];
+	float x2[4], x3[4], x4[4], x5[4];
 };
 
 inline uint32_t bits(float f) { uint32_t u; memcpy(&u, &f, 4); return u; }
@@ -105,6 +105,28 @@ public:
 		const uint32_t npx = uint32_t(t.w) * uint32_t(t.h);
 		if (m_light_sign.size() < s.views.size()) m_light_sign.resize(s.views.size(), 1);
 		if (m_grids.size() < s.views.size()) m_grids.resize(s.views.size());
+
+		// the sky's colour (the spotlight's light outside its pool takes it): the CPU's picture where the
+		// 3D isn't, its top rows
+		if (o.spot) {
+			double sum[3] = { 0, 0, 0 };
+			int n = 0;
+			for (int y = std::max(0, t.cy0); y <= std::min(t.h - 1, t.cy0 + (t.cy1 - t.cy0) * 3 / 5); y += 6)
+				for (int x = std::max(0, t.cx0); x <= std::min(t.w - 1, t.cx1); x += 6) {
+					const uint32_t c = t.px[size_t(y) * t.stride + x];
+					if (c == o.key || (c & 0xff000000u) == (o.shadow_key & 0xff000000u)) continue;
+					sum[0] += (c >> 16) & 255u; sum[1] += (c >> 8) & 255u; sum[2] += c & 255u;
+					n++;
+				}
+			// taken once (the match's start) and kept: taken again only when the sky stays quite
+			// another colour for a second (another stage)
+			if (n > 16) {
+				float v[3], far_ = 0;
+				for (int i = 0; i < 3; i++) { v[i] = float(sum[i] / n / 255.0); far_ = std::max(far_, std::fabs(v[i] - m_sky[i])); }
+				m_sky_off = m_sky[0] < 0 || far_ > 0.15f ? m_sky_off + 1 : 0;
+				if (m_sky[0] < 0 || m_sky_off >= 60) { for (int i = 0; i < 3; i++) m_sky[i] = v[i]; m_sky_off = 0; }
+			}
+		} else m_sky[0] = -1;
 
 		// the polygons and light modes, the picture's (every view's polygons by their place in s.quads)
 		m_planes.assign(s.quads.size() * 4, 0.0f);
@@ -273,6 +295,7 @@ public:
 			u.x2[0] = o.spot_inner; u.x2[1] = o.spot_outer; u.x2[2] = o.spot_dim; u.x2[3] = o.spot_edge;
 			u.x3[0] = P.up.x; u.x3[1] = P.up.y; u.x3[2] = P.up.z; u.x3[3] = P.floor;
 			u.x4[0] = o.spot_height * P.zref; u.x4[1] = o.spot_head * P.zref;
+			if (m_sky[0] >= 0) { u.x5[0] = m_sky[0]; u.x5[1] = m_sky[1]; u.x5[2] = m_sky[2]; u.x5[3] = o.spot_sky; }
 			static const unsigned skip = getenv("RT_GPU_SKIP") ? unsigned(strtoul(getenv("RT_GPU_SKIP"), nullptr, 0)) : 0;   // (debugging: kernels left out, a bit each)
 			auto pass = [&](int k, uint32_t threads, const uniforms &uu) {
 				if (!threads || (skip >> k & 1)) return;
@@ -416,6 +439,8 @@ private:
 	uint32_t m_pictures = 0;
 	std::vector<int> m_light_sign;
 	std::vector<float> m_planes;
+	float m_sky[3] = { -1, -1, -1 };   // the sky's colour (kept), -1 none yet
+	int m_sky_off = 0;                 // pictures in a row whose sky is quite another colour
 	std::vector<view_state> m_views;
 	std::vector<uint32_t> m_quads, m_lights, m_tris, m_jobs, m_nodes, m_btris;
 };
