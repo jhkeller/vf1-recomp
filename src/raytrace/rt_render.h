@@ -39,6 +39,10 @@ struct options
 	float ao_strength = 0.9f;    // how far ambient occlusion darkens the ambient light (0 none, 1 fully)
 	float ao_direct = 0.5f;      // and the direct light, as a share of that (flat-shaded models' creases show it)
 	float ao_radius = 0.3f;      // how near a hit darkens, as a share of the point's depth
+	bool fog = false;            // volumetric lighting (the GPU's only): light through haze, shafts where things block it
+	float fog_density = 0.25f;   // the haze: how much light a ray loses by the view's typical depth
+	float fog_strength = 1.0f;   // how bright the lit haze is
+	int fog_steps = 16;          // steps along each ray a picture (each its own shadow ray)
 	int gi_view = 0;             // 0 the picture; debugging: 1 ambient occlusion alone (grey), 2 bounced light alone
 	bool game_shadows = true;    // the game's shadow polygons
 	bool blend_shadows = true;   // they halve the pixel beneath (above 1x); false: the arcade's checkerboard

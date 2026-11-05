@@ -6,7 +6,7 @@ set -e
 cd "$(dirname "$0")/../.."
 OUT=build/shaders/rt
 mkdir -p $OUT
-KERNELS="clear depth near id moire gi shadow colour"
+KERNELS="clear depth near id moire gi shadow fog colour"
 GLSLANG=${GLSLANG:-glslangValidator}
 for k in $KERNELS; do
 	K=$(echo $k | tr a-z A-Z)

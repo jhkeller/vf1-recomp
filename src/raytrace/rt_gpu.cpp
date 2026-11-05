@@ -23,10 +23,10 @@ namespace {
 
 using clk = std::chrono::steady_clock;
 
-enum : uint32_t { F_TRACE = 1, F_GI = 2, F_GAME_SHADOWS = 4, F_BLEND = 8, F_CLEAR_OUT = 16 };
+enum : uint32_t { F_TRACE = 1, F_GI = 2, F_GAME_SHADOWS = 4, F_BLEND = 8, F_CLEAR_OUT = 16, F_FOG = 32 };
 enum { RO_TRIS, RO_JOBS, RO_QUADS, RO_NODES, RO_BTRIS, RO_LIGHTS, RO_N };
-enum { RW_DEPTH, RW_NEAR, RW_ID, RW_VIS, RW_MOIRE, RW_OUT, RW_GRID, RW_N };
-enum { K_CLEAR, K_DEPTH, K_NEAR, K_ID, K_MOIRE, K_GI, K_SHADOW, K_COLOUR, K_N };
+enum { RW_DEPTH, RW_NEAR, RW_ID, RW_VIS, RW_MOIRE, RW_OUT, RW_GRID, RW_FOG, RW_N };
+enum { K_CLEAR, K_DEPTH, K_NEAR, K_ID, K_MOIRE, K_GI, K_SHADOW, K_FOG, K_COLOUR, K_N };
 
 struct uniforms   // (rt_gpu.comp's U, std140: all four-word rows)
 {
@@ -36,6 +36,7 @@ struct uniforms   // (rt_gpu.comp's U, std140: all four-word rows)
 	float g2[4];
 	uint32_t k0[4];
 	float x0[4];
+	uint32_t x1[4];
 };
 
 inline uint32_t bits(float f) { uint32_t u; memcpy(&u, &f, 4); return u; }
@@ -49,7 +50,7 @@ public:
 		for (SDL_GPUComputePipeline *p : m_k) if (p) SDL_ReleaseGPUComputePipeline(m_dev, p);
 		for (buf &b : m_ro) if (b.b) SDL_ReleaseGPUBuffer(m_dev, b.b);
 		for (buf &b : m_rw) if (b.b) SDL_ReleaseGPUBuffer(m_dev, b.b);
-		for (grid &g : m_grids) if (g.b.b) SDL_ReleaseGPUBuffer(m_dev, g.b.b);
+		for (grid &g : m_grids) { if (g.b.b) SDL_ReleaseGPUBuffer(m_dev, g.b.b); if (g.fog.b) SDL_ReleaseGPUBuffer(m_dev, g.fog.b); }
 		if (m_up) SDL_ReleaseGPUTransferBuffer(m_dev, m_up);
 		if (m_down) SDL_ReleaseGPUTransferBuffer(m_dev, m_down);
 		SDL_DestroyGPUDevice(m_dev);
@@ -61,7 +62,7 @@ public:
 			{ rt_gpu_clear_spv, sizeof rt_gpu_clear_spv, "clear" }, { rt_gpu_depth_spv, sizeof rt_gpu_depth_spv, "depth" },
 			{ rt_gpu_near_spv, sizeof rt_gpu_near_spv, "near" }, { rt_gpu_id_spv, sizeof rt_gpu_id_spv, "id" },
 			{ rt_gpu_moire_spv, sizeof rt_gpu_moire_spv, "moire" }, { rt_gpu_gi_spv, sizeof rt_gpu_gi_spv, "gi" },
-			{ rt_gpu_shadow_spv, sizeof rt_gpu_shadow_spv, "shadow" }, { rt_gpu_colour_spv, sizeof rt_gpu_colour_spv, "colour" },
+			{ rt_gpu_shadow_spv, sizeof rt_gpu_shadow_spv, "shadow" }, { rt_gpu_fog_spv, sizeof rt_gpu_fog_spv, "fog" }, { rt_gpu_colour_spv, sizeof rt_gpu_colour_spv, "colour" },
 		};
 		// (debugging: RT_GPU_SPV_DIR=dir loads <dir>/<kernel>.spv instead, tools/gpu/rt_shaders.sh's build/shaders/rt)
 		const char *spv_dir = getenv("RT_GPU_SPV_DIR");
@@ -197,6 +198,17 @@ public:
 				grid_new = true;
 			}
 			if (!G.b.b && !grow(G.b, 48, true)) { SDL_CancelGPUCommandBuffer(cb); return false; }
+			// volumetric lighting's grid: a point a game pixel (cleared to "nothing kept" when made)
+			const bool fog = o.fog && P.ll > 0 && !P.accel.nodes.empty();
+			const int fs = std::max(1, int(v.scale + 0.5f));
+			const int fw = (clip[2] - clip[0]) / fs + 1, fh = (clip[3] - clip[1]) / fs + 1;
+			bool fog_new = false;
+			if (fog && (G.fw != fw || G.fh != fh || G.fstep != fs || !G.fog.b)) {
+				G.fw = fw; G.fh = fh; G.fstep = fs;
+				if (!grow(G.fog, uint32_t(fw) * fh * 16, true)) { SDL_CancelGPUCommandBuffer(cb); return false; }
+				fog_new = true;
+			}
+			if (!G.fog.b && !grow(G.fog, 16, true)) { SDL_CancelGPUCommandBuffer(cb); return false; }
 
 			// up
 			const size_t sizes[RO_N] = { m_tris.size() * 4, m_jobs.size() * 4, m_quads.size() * 4, m_nodes.size() * 4, m_btris.size() * 4, m_lights.size() * 4 };
@@ -209,6 +221,8 @@ public:
 				for (size_t k = 0; k < size_t(gw) * gh; k++) { grid_init[k * 12] = 0xffffffffu; grid_init[k * 12 + 1] = bits(1.0f); }
 				up += grid_init.size() * 4;
 			}
+			const size_t fog_bytes = fog_new ? size_t(fw) * fh * 16 : 0;
+			up += fog_bytes;
 			if (!transfer(m_up, m_up_n, uint32_t(up), SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD)) { SDL_CancelGPUCommandBuffer(cb); return false; }
 			uint8_t *map = (uint8_t *)SDL_MapGPUTransferBuffer(m_dev, m_up, true);
 			if (!map) { SDL_CancelGPUCommandBuffer(cb); return false; }
@@ -216,7 +230,9 @@ public:
 			uint32_t offs[RO_N + 1];
 			for (int i = 0; i < RO_N; i++) { offs[i] = uint32_t(at); memcpy(map + at, srcs[i], sizes[i]); at += sizes[i]; }
 			offs[RO_N] = uint32_t(at);
-			if (grid_new) memcpy(map + at, grid_init.data(), grid_init.size() * 4);
+			if (grid_new) { memcpy(map + at, grid_init.data(), grid_init.size() * 4); at += grid_init.size() * 4; }
+			const uint32_t fog_at = uint32_t(at);
+			if (fog_new) memset(map + at, 0, fog_bytes);
 			SDL_UnmapGPUTransferBuffer(m_dev, m_up);
 			{
 				SDL_GPUCopyPass *cp = SDL_BeginGPUCopyPass(cb);
@@ -230,6 +246,11 @@ public:
 					SDL_GPUBufferRegion r = { G.b.b, 0, uint32_t(grid_init.size() * 4) };
 					SDL_UploadToGPUBuffer(cp, &l, &r, false);
 				}
+				if (fog_new) {
+					SDL_GPUTransferBufferLocation l = { m_up, fog_at };
+					SDL_GPUBufferRegion r = { G.fog.b, 0, uint32_t(fog_bytes) };
+					SDL_UploadToGPUBuffer(cp, &l, &r, false);
+				}
 				SDL_EndGPUCopyPass(cp);
 			}
 
@@ -237,7 +258,7 @@ public:
 			uniforms u = {};
 			u.u0[0] = uint32_t(t.w); u.u0[1] = uint32_t(clip[0]); u.u0[2] = uint32_t(clip[1]); u.u0[3] = uint32_t(clip[2]);
 			u.u1[0] = uint32_t(clip[3]);
-			u.u1[3] = (trace ? F_TRACE : 0) | (gi ? F_GI : 0) | (moire ? F_GAME_SHADOWS : 0) | (o.blend_shadows ? F_BLEND : 0);
+			u.u1[3] = (trace ? F_TRACE : 0) | (gi ? F_GI : 0) | (moire ? F_GAME_SHADOWS : 0) | (o.blend_shadows ? F_BLEND : 0) | (fog ? F_FOG : 0);
 			u.v0[0] = v.xc; u.v0[1] = v.yc; u.v0[2] = v.zoomx; u.v0[3] = v.zoomy;
 			u.v1[0] = v.viewx; u.v1[1] = v.viewy; u.v1[2] = v.ext; u.v1[3] = v.scale;
 			u.lt[0] = P.L.x; u.lt[1] = P.L.y; u.lt[2] = P.L.z; u.lt[3] = P.ll;
@@ -246,13 +267,15 @@ public:
 			if (!P.accel.nodes.empty()) { const v3 e = P.accel.nodes[0].hi - P.accel.nodes[0].lo; u.g2[0] = std::sqrt(dot(e, e)); }
 			u.g2[1] = o.gi_strength; u.g2[2] = o.ao_strength; u.g2[3] = o.ao_direct;
 			u.k0[0] = o.key; u.k0[1] = o.shadow_key; u.k0[2] = o.mark; u.k0[3] = uint32_t(o.gi_view);
-			u.x0[0] = o.ao_radius;
+			u.x0[0] = o.ao_radius; u.x0[1] = o.fog_density / P.zref; u.x0[2] = o.fog_strength; u.x0[3] = P.zref;
+			u.x1[0] = uint32_t(fs); u.x1[1] = uint32_t(fw); u.x1[2] = uint32_t(fh); u.x1[3] = uint32_t(std::max(1, o.fog_steps));
 			static const unsigned skip = getenv("RT_GPU_SKIP") ? unsigned(strtoul(getenv("RT_GPU_SKIP"), nullptr, 0)) : 0;   // (debugging: kernels left out, a bit each)
 			auto pass = [&](int k, uint32_t threads, const uniforms &uu) {
 				if (!threads || (skip >> k & 1)) return;
 				SDL_GPUStorageBufferReadWriteBinding bw[RW_N] = {};
 				for (int i = 0; i < RW_GRID; i++) bw[i].buffer = m_rw[i].b;
 				bw[RW_GRID].buffer = G.b.b;
+				bw[RW_FOG].buffer = G.fog.b;
 				SDL_GPUComputePass *c = SDL_BeginGPUComputePass(cb, nullptr, 0, bw, RW_N);
 				SDL_BindGPUComputePipeline(c, m_k[k]);
 				SDL_GPUBuffer *ro[RO_N];
@@ -280,6 +303,7 @@ public:
 			if (moire) { uniforms m = u; m.u1[2] = solid_jobs; pass(K_MOIRE, all_jobs - solid_jobs, m); }
 			if (gi) pass(K_GI, uint32_t(gw) * uint32_t(gh), u);
 			if (trace) pass(K_SHADOW, ((cw - 1) / 2 + 1) * ((ch - 1) / 2 + 1), u);
+			if (fog) pass(K_FOG, uint32_t(fw) * uint32_t(fh), u);
 			pass(K_COLOUR, cw * ch, u);
 
 			if (vi != vlast) {
@@ -323,6 +347,12 @@ public:
 					if (v & 0x80000000u) {
 						p[x] = v & keep;
 						if (v & o.mark) { m0 = std::min(m0, y); m1 = std::max(m1, y); }
+					} else if (v & 0x20000000u) {   // (the haze over the CPU's picture: the sky)
+						const uint32_t c = p[x];
+						if (c == o.key || c == o.shadow_key) continue;
+						const float th = float((v >> 12) & 4095u) / 4095.0f, sc = float(v & 4095u) / 4095.0f * 4.0f * o.fog_strength;
+						auto ch = [&](int sh, float haze) { return uint32_t(std::clamp(float((c >> sh) & 255u) * th + haze * sc * 255.0f + 0.5f, 0.0f, 255.0f)) << sh; };
+						p[x] = (c & 0xff000000u) | ch(16, 1.0f) | ch(8, 0.96f) | ch(0, 0.88f);
 					} else {
 						const uint32_t c = p[x], half = v & 0x7f7f7fu;
 						if (c == o.key) p[x] = o.shadow_key | half;
@@ -344,7 +374,7 @@ public:
 
 private:
 	struct buf { SDL_GPUBuffer *b = nullptr; uint32_t n = 0; };
-	struct grid { buf b; int w = 0, h = 0, step = 0, x0 = 0, y0 = 0; };
+	struct grid { buf b, fog; int w = 0, h = 0, step = 0, x0 = 0, y0 = 0, fw = 0, fh = 0, fstep = 0; };
 	struct view_state { prepared p; bool ok = false; };
 
 	bool grow(buf &b, uint32_t n, bool rw)

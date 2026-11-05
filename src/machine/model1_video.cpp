@@ -2549,7 +2549,7 @@ void model1::video_start()
 	m_rt_dump = getenv("VF_RT_CAPTURE") || getenv("VF_RT_DUMP");
 	if (const char *m = getenv("VF_RT")) {
 		m_rt_raster = !strcmp(m, "raster");
-		set_rt(!strcmp(m, "shadows") || !strcmp(m, "gi"), !strcmp(m, "gi"));
+		set_rt(strstr(m, "shadows") || !strcmp(m, "gi"), strstr(m, "gi") != nullptr, strstr(m, "fog") != nullptr);
 	}
 	m_rt_capture = m_rt_dump || rt_on();
 }

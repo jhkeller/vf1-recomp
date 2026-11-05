@@ -12,6 +12,8 @@
 //  - K_MOIRE    the game's shadow polygons: the first over each pixel (blended), or the last (1x's checkerboard);
 //  - K_GI       global illumination's grid points (kept from picture to picture in GRID);
 //  - K_SHADOW   the shadow rays from every other pixel each way;
+//  - K_FOG      volumetric lighting: from points a game pixel apart, the view ray marched through the
+//               haze to what it meets, each step's light seen or blocked (a shadow ray), kept in FOG;
 //  - K_COLOUR   each pixel's colour into OUT: bit 31 a colour, bit 30 a game's shadow over what the
 //               CPU has there (its half colour), bit 24 the shadow's mark.
 #version 450
@@ -31,6 +33,7 @@ layout(std430, set = 1, binding = 3) buffer B_VIS { uint VIS[]; };              
 layout(std430, set = 1, binding = 4) buffer B_MOIRE { uint MOIRE[]; };
 layout(std430, set = 1, binding = 5) buffer B_OUT { uint OUT[]; };
 layout(std430, set = 1, binding = 6) buffer B_GRID { uint GRID[]; };               // 12 words a point: id ao r g b nx ny nz z - - -
+layout(std430, set = 1, binding = 7) buffer B_FOG { uint FOG[]; };                 // 4 words a point: light scattered in, light let through, depth, -
 layout(std140, set = 2, binding = 0) uniform U
 {
 	uvec4 u0;   // stride, clip x0 y0 x1
@@ -42,7 +45,8 @@ layout(std140, set = 2, binding = 0) uniform U
 	uvec4 g1;   // picture, grid x0 y0, the solid triangles (the game's shadows' after)
 	vec4 g2;    // scene diagonal, gi strength, ao strength, ao's share of the direct light
 	uvec4 k0;   // key, shadow key, mark, view (0 the picture; 1 ambient occlusion alone, 2 bounced light alone)
-	vec4 x0;    // ao radius (a share of the depth), -, -, -
+	vec4 x0;    // ao radius (a share of the depth), haze density (per unit of depth), haze brightness, the view's typical depth
+	uvec4 x1;   // haze grid step, w, h, steps a ray
 };
 #define AO_RADIUS x0.x
 #define STRIDE u0.x
@@ -58,6 +62,7 @@ layout(std140, set = 2, binding = 0) uniform U
 #define F_GAME_SHADOWS 4u
 #define F_BLEND 8u
 #define F_CLEAR_OUT 16u
+#define F_FOG 32u
 
 const float DEPTH_EPS = 2e-5;
 const float LAYER_EPS = 2e-3;
@@ -382,7 +387,75 @@ void main()
 }
 #endif
 
+#ifdef K_FOG
+void main()
+{
+	const uint t = thread_index();
+	if (t >= NTHREADS) return;
+	const uint step = x1.x, fw = x1.y;
+	const uint fx = t % fw, fy = t / fw;
+	const int x = min(CX1, CX0 + int(fx * step + step / 2u)), y = min(CY1, CY0 + int(fy * step + step / 2u));
+	const uint i = pixel_at(x, y);
+	const uint b = t * 4u;
+	// (nothing drawn there, the sky behind: the haze as far as three times the view's typical depth)
+	const bool sky = IDB[i] == 0u;
+	const vec3 P = sky ? place(float(x) + 0.5, float(y) + 0.5, 1.0 / (3.0 * x0.w)) : place(float(x) + 0.5, float(y) + 0.5, fl(DEPTH[i]));
+	const float dist = length(P);
+	const vec3 dir = P / dist;
+	const vec3 L = lt.xyz;
+	const float sigma = x0.y;
+	const uint steps = max(1u, x1.w);
+	uint seed = hash32(t * 2654435761u ^ g1.x * 83492791u);
+	const float jitter = unit_rand(seed);
+	const float dt = dist / float(steps);
+	float scattered = 0.0;
+	for (uint k = 0u; k < steps; k++) {
+		const float tk = (float(k) + jitter) * dt;
+		const vec3 S = dir * tk;
+		float th;
+		uint hq;
+		const bool blocked = lt.w > 0.0 && trace(S, L, 0xffffffffu, S, 0.0, true, th, hq);
+		if (!blocked) scattered += exp(-sigma * tk) * sigma * dt;
+	}
+	// forward scattering (Henyey-Greenstein, g 0.4, isotropic as 1, at most 3): brighter looking toward the light
+	const float g = 0.4, ct = dot(dir, L);
+	scattered *= min(3.0, (1.0 - g * g) / pow(max(1e-4, 1.0 + g * g - 2.0 * g * ct), 1.5));
+	const float through = exp(-sigma * dist);
+	// kept from the pictures before where the depth there is much the same (the steps' jitter averaged out)
+	const float z0 = fl(FOG[b + 2u]), zs = sky ? -1.0 : P.z;
+	const float keep = sky ? (z0 < 0.0 ? 0.8 : 0.0) : (abs(z0 - P.z) < 0.03 * P.z ? 0.8 : 0.0);
+	FOG[b] = floatBitsToUint(fl(FOG[b]) * keep + scattered * (1.0 - keep));
+	FOG[b + 1u] = floatBitsToUint(fl(FOG[b + 1u]) * keep + through * (1.0 - keep));
+	FOG[b + 2u] = floatBitsToUint(zs);
+}
+#endif
+
 #ifdef K_COLOUR
+// The haze at a pixel: the points around it at about its depth, weighed by nearness
+bool fog_at(int x, int y, float z, out float scattered, out float through)
+{
+	const int step = int(x1.x), fw = int(x1.y), fh = int(x1.z);
+	const float fx = float(x - CX0 - step / 2) / float(step), fy = float(y - CY0 - step / 2) / float(step);
+	const int fx0 = int(floor(fx)), fy0 = int(floor(fy));
+	float wsum = 0.0, sc = 0.0, th = 0.0;
+	for (int dy = 0; dy <= 1; dy++)
+		for (int dx = 0; dx <= 1; dx++) {
+			const int gx = clamp(fx0 + dx, 0, fw - 1), gy = clamp(fy0 + dy, 0, fh - 1);
+			const uint b = uint(gy * fw + gx) * 4u;
+			const float gz = fl(FOG[b + 2u]);
+			if (gz == 0.0 || (gz < 0.0) != (z < 0.0)) continue;   // (the sky's (z -1) with the sky's only)
+			const float w = (1.0 - abs(fx - float(fx0 + dx))) * (1.0 - abs(fy - float(fy0 + dy))) + 1e-3;
+			const float dz = z < 0.0 ? 0.0 : abs(gz - z) / (0.05 * z);
+			const float wz = w * max(0.0, 1.0 - dz) + 1e-6 * w;
+			wsum += wz;
+			sc += fl(FOG[b]) * wz;
+			th += fl(FOG[b + 1u]) * wz;
+		}
+	if (wsum <= 0.0) return false;
+	scattered = sc / wsum;
+	through = th / wsum;
+	return true;
+}
 bool gi_at(int x, int y, uint qi, vec3 N, float z, out float ao, out vec3 bounce)
 {
 	const int step = int(g0.x), gw = int(g0.y), gh = int(g0.z);
@@ -464,6 +537,14 @@ void main()
 				c = pack_rgb(k0.w == 1u ? vec3(occ) : k0.w == 2u ? add : amb * occ + direct * docc + add);
 			}
 		}
+		if ((FLAGS & F_FOG) != 0u) {
+			const vec3 P = place(float(x) + 0.5, float(y) + 0.5, fl(DEPTH[i]));
+			float sc, th;
+			if (fog_at(x, y, P.z, sc, th)) {
+				const vec3 haze = vec3(1.0, 0.96, 0.88) * x0.z;   // (the light's colour: a warm white)
+				c = pack_rgb(rgb_of(c) * th + haze * sc);
+			}
+		}
 		res = 0x80000000u | (c & 0xffffffu);
 	}
 	// the game's shadow polygons over it (when drawn)
@@ -482,6 +563,12 @@ void main()
 			}
 		} else if (m != 0u)
 			res = 0x80000000u | (QUADS[quad_of_tri(m - 1u) * 8u] & 0xffffffu);
+	}
+	// the haze over the sky (the CPU's picture there): what it lets through and adds, 12 bits each
+	if (res == 0u && (FLAGS & F_FOG) != 0u && OUT[i] == 0u) {
+		float sc, th;
+		if (fog_at(x, y, -1.0, sc, th))
+			res = 0x20000000u | (uint(clamp(th, 0.0, 1.0) * 4095.0 + 0.5) << 12) | uint(clamp(sc * 0.25, 0.0, 1.0) * 4095.0 + 0.5);
 	}
 	if (res != 0u) OUT[i] = res;
 }

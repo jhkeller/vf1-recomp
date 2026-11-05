@@ -106,7 +106,14 @@ bool prepare(const scene &s, size_t vi, const target &t, const options &o, std::
 	}
 
 	// the rays' BVH: every polygon of the view that can block the light or send it on, those facing away too
-	const bool need_bvh = o.shadows || o.gi;
+	const bool need_bvh = o.shadows || o.gi || o.fog;
+	if (!p.order.empty()) {
+		std::vector<float> zs;
+		zs.reserve(p.order.size());
+		for (int32_t k : p.order) { const quad &q = s.quads[k]; zs.push_back(0.25f * (q.v[0][2] + q.v[1][2] + q.v[2][2] + q.v[3][2])); }
+		std::nth_element(zs.begin(), zs.begin() + zs.size() / 2, zs.end());
+		p.zref = std::max(1e-3f, std::fabs(zs[zs.size() / 2]));
+	}
 	p.accel.tris.clear();
 	p.accel.nodes.clear();
 	if (need_bvh) {

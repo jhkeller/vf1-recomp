@@ -113,6 +113,7 @@ void model1::rt_end(bitmap_rgb32 &bitmap, const rectangle &cliprect)
 		rt::options o;
 		o.shadows = m_rt_shadows;
 		o.gi = m_rt_gi;
+		o.fog = m_rt_fog;
 		o.game_shadows = !o.shadows;
 		o.blend_shadows = s_moire_blend;
 		o.key = KEY; o.shadow_key = SHADOW_KEY; o.mark = 0x01000000;   // (model1_video.cpp's MOIRE_MARK)

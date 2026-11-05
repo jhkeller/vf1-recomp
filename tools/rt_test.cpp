@@ -176,6 +176,11 @@ static int run(const std::string &dir, float sign, const draw_fn &draw)
 		const uint32_t foot = at(-80, -100, 470), open = at(-300, -100, 1200);
 		check("floor at the box's foot redder (bounce)", r8(foot) > r8(open), foot, open);
 	}
+	// volumetric lighting (the GPU's only; the CPU's picture as without it): written for a look
+	o.gi = false;
+	o.fog = true;
+	for (int k = 0; k < 6; k++) { std::fill(px.begin(), px.end(), 0x202020); r = draw(s, t, o); }
+	write_ppm(dir + "/rt_fog.ppm", px, W, H);
 	return fails;
 }
 

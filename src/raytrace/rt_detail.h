@@ -306,6 +306,7 @@ struct prepared
 	bvh accel;                           // the rays' (empty unless shadows or global illumination)
 	v3 L{ 0, 1, 0 };                     // toward the light (unit)
 	float ll = 0;                        // the light vector's length (0: no light)
+	float zref = 1;                      // the view's typical depth (its drawn polygons' median)
 };
 // false: nothing of this view to draw. planes: a polygon's plane (unit normal, offset), 4 floats a
 // polygon, by its place in s.quads (this view's filled); light_sign: the view's kept light side.
