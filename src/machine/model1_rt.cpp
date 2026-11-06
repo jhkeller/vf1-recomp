@@ -125,7 +125,7 @@ void model1::rt_end(bitmap_rgb32 &bitmap, const rectangle &cliprect)
 		o.gi_view = m_rt_view;
 		if (m_rt_gpu && !m_rt_gpu_failed) {   // (the GPU's quality: a grid point a game pixel, twice the rays)
 			o.gi_step = std::max(1, m_scale);
-			o.gi_rays = 12;
+			o.gi_rays = 24;
 		}
 		const uint64_t t0 = trace_ns();
 		rt::result r;

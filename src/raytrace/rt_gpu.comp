@@ -369,7 +369,7 @@ void main()
 	}
 	const float ao = 1.0 - occluded / float(nrays);
 	bounce /= float(nrays);
-	const float keep = same ? 0.85 : like ? 0.6 : 0.0;
+	const float keep = same ? 0.92 : like ? 0.75 : 0.0;
 	GRID[b + 1u] = floatBitsToUint(fl(GRID[b + 1u]) * keep + ao * (1.0 - keep));
 	for (uint c = 0u; c < 3u; c++) GRID[b + 2u + c] = floatBitsToUint(fl(GRID[b + 2u + c]) * keep + bounce[c] * (1.0 - keep));
 	GRID[b] = qi;
@@ -483,8 +483,8 @@ bool gi_at(int x, int y, uint qi, vec3 N, float z, out float ao, out vec3 bounce
 	const int gx0 = int(floor(fx)), gy0 = int(floor(fy));
 	float wsum = 0.0, a = 0.0;
 	vec3 c = vec3(0);
-	for (int dy = -2; dy <= 3; dy++)
-		for (int dx = -2; dx <= 3; dx++) {
+	for (int dy = -3; dy <= 4; dy++)
+		for (int dx = -3; dx <= 4; dx++) {
 			const int gx = gx0 + dx, gy = gy0 + dy;
 			if (gx < 0 || gy < 0 || gx >= gw || gy >= gh) continue;
 			const uint b = uint(gy * gw + gx) * 12u;
@@ -499,7 +499,7 @@ bool gi_at(int x, int y, uint qi, vec3 N, float z, out float ao, out vec3 bounce
 				like = (nd - 0.7) / 0.3 * (1.0 - dz) * 0.5;
 			}
 			const float ddx = fx - float(gx), ddy = fy - float(gy);
-			const float w = like * exp(-0.35 * (ddx * ddx + ddy * ddy));
+			const float w = like * exp(-0.18 * (ddx * ddx + ddy * ddy));
 			wsum += w;
 			a += fl(GRID[b + 1u]) * w;
 			c += vec3(fl(GRID[b + 2u]), fl(GRID[b + 3u]), fl(GRID[b + 4u])) * w;
@@ -564,7 +564,7 @@ void main()
 				// the bounced light: its colour pushed a little further, mostly where the light doesn't reach
 				// (what's lit fully already gets a share, so it doesn't wash out)
 				const float bl = dot(bounce, vec3(0.299, 0.587, 0.114));
-				const vec3 add = alb * max(mix(vec3(bl), bounce, 1.6), vec3(0)) * g2.y * (lit ? 0.4 : 1.0);
+				const vec3 add = alb * max(mix(vec3(bl), bounce, 1.3), vec3(0)) * g2.y * (lit ? 0.4 : 1.0);
 				c = pack_rgb(k0.w == 1u ? vec3(occ) : k0.w == 2u ? add : (amb * occ + add) * sa + direct * docc * spot);
 			}
 		}
