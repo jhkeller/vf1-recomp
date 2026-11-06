@@ -115,6 +115,8 @@ void model1::rt_end(bitmap_rgb32 &bitmap, const rectangle &cliprect)
 		o.gi = m_rt_gi;
 		o.fog = m_rt_fog;
 		o.spot = m_rt_spot;
+		if (const char *e = getenv("VF_RT_GI"))   // (tuning: strength,ao,ao_direct,ao_radius)
+			sscanf(e, "%f,%f,%f,%f", &o.gi_strength, &o.ao_strength, &o.ao_direct, &o.ao_radius);
 		if (const char *e = getenv("VF_RT_SPOT"))   // (tuning: inner,outer,dim,edge,height,head,sky)
 			sscanf(e, "%f,%f,%f,%f,%f,%f,%f", &o.spot_inner, &o.spot_outer, &o.spot_dim, &o.spot_edge, &o.spot_height, &o.spot_head, &o.spot_sky);
 		o.game_shadows = !o.shadows;
