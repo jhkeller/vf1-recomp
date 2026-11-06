@@ -18,6 +18,7 @@
 #include <map>
 #include "s24tile.h"
 #include "../gpu/gpu3d.h"
+#include "../raytrace/rt_scene.h"
 #include "m1audio.h"
 #include "model1io.h"
 #include "../core/v60_device.h"
@@ -793,6 +794,18 @@ public:
 	// line, a vertex that isn't a number) or a GPU error: that picture drawn by the CPU from the
 	// recording. Off: the CPU's way, untouched.
 	void set_gpu3d(gpu3d *g) { m_gpu3d = g; }
+	// ray tracing (src/raytrace, model1_rt.cpp): shadows, global illumination; either on, the 3D is the ray-traced renderer's
+	void set_rt(bool shadows, bool gi, bool fog = false, bool spot = false) { m_rt_shadows = shadows; m_rt_gi = gi; m_rt_fog = fog; m_rt_spot = spot; m_rt_capture = m_rt_dump || rt_on(); }
+	// the next `pictures` scenes the ray tracer draws written to `dir` (scene_NNNN.rts, for rttest --scene)
+	void rt_record(const std::string &dir, int pictures) { m_rt_rec_dir = dir; m_rt_rec_left = pictures; m_rt_rec_n = 0; }
+	bool rt_recording() const { return m_rt_rec_left > 0; }
+	// ray-traced lighting drawn by the GPU (rt_gpu.h; null: the CPU's). A picture it can't draw is
+	// drawn on the CPU, and the CPU's from then on (rt_gpu_failed).
+	void set_rt_gpu(rt::gpu_renderer *g) { m_rt_gpu = g; m_rt_gpu_failed = false; }
+	bool rt_gpu_failed() const { return m_rt_gpu_failed; }
+	// debugging global illumination: 0 the picture, 1 its ambient occlusion alone, 2 its bounced light alone
+	void set_rt_view(int v) { m_rt_view = v; }
+	double rt_ms() const { return m_rt_ms; }
 	void set_gpu3d_on(bool on) { m_gpu3d_on = on; }
 	// The host's renderer is on the 3D's GPU device (SDL's "gpu" renderer): pictures put together in
 	// parts have their 3D drawn straight into its textures (gpu_parts::d3_target), not into frame().
@@ -1128,55 +1141,30 @@ private:
 		bool spec_enable = false;
 	};
 
-	// Ray-traced lighting, phase 1 (src/machine/model1_rt.cpp): the 3D scene as the game built it,
-	// each quad in view space before it's culled, clipped, projected and flattened to one colour, so
-	// a renderer can light it again (shadows, reflections, bounced light). View space is the game's:
-	// x right, y up, z forward (into the screen). Only gathered while m_rt_capture is on; nothing
-	// here changes what the game or the arcade renderers draw.
-	enum rt_flag : uint8_t
-	{
-		RT_MOIRE = 1,    // one of the game's shadow polygons (a ray-traced picture leaves them out)
-		RT_STAGE = 2,    // from a stage's model (stage_model)
-		RT_CULLED = 4,   // facing away: not drawn by the game, but it casts shadows and shows in reflections
-		RT_UNLIT = 8,    // a flat UI element the game draws unlit
-		RT_TWO_SIDED = 16,   // never culled (the polygon's flags bit 14)
-		RT_RECOLOURED = 32,  // albedo is the game's final colour (random fighter, build effect); unset on culled ones (palette's)
-	};
-	struct rt_quad
-	{
-		float v[4][3];          // view space, in the game's winding (old_p1, old_p0, p0, p1)
-		float n[3];             // unit normal, view space
-		uint32_t albedo = 0;    // 0x00rrggbb: the polygon's colour unlit (fully lit, as the game's colour table has it)
-		uint32_t lit = 0;       // 0x00rrggbb: the colour the game drew it (0 for culled ones)
-		uint32_t obj = 0;       // its model's address (the polygons' list in ROM / RAM)
-		uint16_t view = 0;      // which rt_view it belongs to
-		uint8_t lightmode = 0;  // index into its view's light parameters (0x80 | n: the second bank)
-		uint8_t flags = 0;      // rt_flag
-	};
-	struct rt_view
-	{
-		float xc = 0, yc = 0, zoomx = 0, zoomy = 0, viewx = 0, viewy = 0, ext = 0, scale = 1;   // project_point's
-		int x1 = 0, y1 = 0, x2 = 0, y2 = 0;    // its clip, render pixels
-		float light[3] = {};                   // the light vector (unit, but Sarah's stage keeps its length)
-		bool spec_enable = false;
-		uint32_t first = 0, count = 0;         // its quads in rt_scene::quads
-	};
-	struct rt_scene
-	{
-		std::vector<rt_quad> quads;
-		std::vector<rt_view> views;
-		std::vector<lightparam_t> lightparams;   // 256, as the frame's views had them (the game sets them once a list)
-		uint64_t frame = 0;
-		double moment = 0;                       // smooth motion's moment drawn (m_draw_time)
-		void clear() { quads.clear(); views.clear(); }
-	};
+	// Ray-traced lighting (src/machine/model1_rt.cpp, src/raytrace): the 3D scene as the game built
+	// it, gathered while m_rt_capture is on; drawn by the ray-traced renderer instead of the
+	// arcade's while any of its modes is on (the menu's Display > Ray-traced shadows / Ray-traced
+	// lighting, F7 / F8, or VF_RT). Off, nothing the game or the arcade renderers draw changes.
+	bool m_rt_raster = false;    // its renderer, with nothing ray-traced (VF_RT=raster: should look as the arcade's)
+	bool m_rt_shadows = false;   // ray-traced shadows instead of the game's blob shadows
+	bool m_rt_gi = false;        // ray-traced global illumination: light bounced off what's near, and ambient occlusion
+	bool m_rt_fog = false;       // volumetric lighting (the GPU's only)
+	bool m_rt_spot = false;      // a spotlight on the fight (the GPU's only)
+	bool m_rt_dump = false;      // (VF_RT_CAPTURE / VF_RT_DUMP: the capture kept on)
 	bool m_rt_capture = false;
-	rt_scene m_rt_scene;
+	rt::gpu_renderer *m_rt_gpu = nullptr;
+	bool m_rt_gpu_failed = false;
+	int m_rt_view = 0;
+	double m_rt_ms = 0;             // the last picture's ray tracing (its renderer's time)
+	std::string m_rt_rec_dir;       // rt_record's
+	int m_rt_rec_left = 0, m_rt_rec_n = 0;
+	bool rt_on() const { return m_rt_raster || m_rt_shadows || m_rt_gi || m_rt_fog || m_rt_spot; }
+	rt::scene m_rt_scene;
 	void rt_begin();
 	void rt_view_set();
-	void rt_end();
-	void rt_add(const point_t *a, const point_t *b, const point_t *c, const point_t *d, const glm::vec3 &n,
-		uint32_t albedo, uint32_t lit, uint32_t obj, int lightmode, uint8_t flags);
+	void rt_end(bitmap_rgb32 &bitmap, const rectangle &cliprect);
+	void rt_add(const point_t *a, const point_t *b, const point_t *c, const point_t *d, glm::vec3 n,
+		uint32_t albedo, uint32_t lit, uint32_t shade, uint32_t obj, int lightmode, uint8_t flags, float sortz = 0);
 	uint32_t rt_palette_colour(uint16_t tex_data) const;   // a culled polygon's albedo: its pen, no recolouring
 	void rt_dump(const char *dir) const;                   // the scene as Wavefront OBJ + MTL (VF_RT_DUMP)
 

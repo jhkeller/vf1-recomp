@@ -15,6 +15,9 @@
 #include "gpu_compose.h"
 #include "controls.h"
 #include "../machine/parallel.h"
+#if VF_GPU3D_SDL
+#include "../raytrace/rt_gpu.h"
+#endif
 #include "../rt/rec_rt.h"
 #ifdef VF_NATIVE
 #include "../rt/native.h"
@@ -546,6 +549,7 @@ struct settings
 	int scale = 2, aspect = 0, volume = 100, music = 100, effects = 100, aa = 1, filter = 0, ring = 0;
 	int crt_colours = 0, brightness = 100, gamma = 100;   // the picture's colours: an arcade monitor's (crt::PRESETS), the player's brightness and gamma (%)
 	int renderer3d = 2;     // the 3D's renderer: 0 the CPU, 1 the GPU, 2 Auto (whichever is quicker here)
+	bool rt_shadows = false, rt_gi = false, rt_fog = false, rt_spot = false;   // ray-traced shadows, ray-traced lighting (src/raytrace: the 3D on the CPU while either is on)
 	int graphics = 0;       // Windows: the GPU's driver, from the next start: 0 Auto (Vulkan first, Direct3D 12 if it won't start), 1 Direct3D 12
 	int akira_slot = 0;     // Cheats: who plays in Akira's place (model1::UNUSED_CHARACTERS; 0 Akira)
 	bool random_cpu = false;   // Cheats: with Random fighter, the computer's every opponent a random fighter too
@@ -620,6 +624,10 @@ struct settings
 		flag("show_fps", show_fps);
 		num("arcade_coins", arcade_coin, -1, 0xffff);
 		num("renderer_3d", renderer3d, 0, 2);
+		flag("rt_shadows", rt_shadows);
+		flag("rt_gi", rt_gi);
+		flag("rt_fog", rt_fog);
+		flag("rt_spot", rt_spot);
 		num("graphics", graphics, 0, 1);
 		num("akira_slot", akira_slot, 0, int(std::size(model1::UNUSED_CHARACTERS)) - 1);
 		num("random_fighter", random_fighter, 0, 2);   // (0 off, else on: 2 was "Looks + moves", now what on is)
@@ -686,6 +694,7 @@ struct settings
 		if (!log) fprintf(f, "log = 0\n");
 		if (arcade_coin >= 0) fprintf(f, "arcade_coins = %d\n", arcade_coin);
 		fprintf(f, "renderer_3d = %d\n", renderer3d);
+		fprintf(f, "rt_shadows = %d\nrt_gi = %d\nrt_fog = %d\nrt_spot = %d\n", int(rt_shadows), int(rt_gi), int(rt_fog), int(rt_spot));
 		if (graphics) fprintf(f, "graphics = %d\n", graphics);
 		if (akira_slot) fprintf(f, "akira_slot = %d\n", akira_slot);
 		for (int p = 0; p < 2; p++) {
@@ -1088,6 +1097,14 @@ int main(int argc, char **argv)
 	g_pc_mode = !cfg.arcade;
 	// the 3D's renderer: VF_3D=cpu|gpu|auto (tests) over the setting
 	if (const char *r = getenv("VF_3D")) cfg.renderer3d = !strcmp(r, "cpu") ? 0 : !strcmp(r, "gpu") ? 1 : 2;
+	// ray tracing: VF_RT=shadows|gi|off over the settings (raster: the machine's own, for tests)
+	if (const char *r = getenv("VF_RT")) {
+		// (VF_RT=shadows, gi (with shadows), fog, or a list: "shadows,gi,fog")
+		cfg.rt_shadows = strstr(r, "shadows") || !strcmp(r, "gi");
+		cfg.rt_gi = strstr(r, "gi") != nullptr;
+		cfg.rt_fog = strstr(r, "fog") != nullptr;
+		cfg.rt_spot = strstr(r, "spot") != nullptr;
+	}
 #if VF_GPU3D_METAL
 	gpu3d_metal_prewarm();   // (its shaders compiled while the game boots: ready if the menu or Auto picks it)
 #endif
@@ -1608,6 +1625,27 @@ int main(int argc, char **argv)
 		cfg.auto_3d = out + (out.empty() ? "" : ",") + k + (gpu ? "g" : "c");
 	};
 	auto apply_3d = [&] { m.set_gpu3d_on(g3 && !a3.broken && a3.gpu); m.m_gpu3d_chosen = cfg.renderer3d == 1; };
+	// Ray-traced lighting on the GPU (src/raytrace/rt_gpu.h: Vulkan, a device of its own), made the
+	// first time it's turned on; none (no Vulkan here, or VF_RT_CPU=1): on the CPU.
+#if VF_GPU3D_SDL
+	std::unique_ptr<rt::gpu_renderer> rt_gpu;
+	bool rt_gpu_tried = false;
+#endif
+	auto rt_gpu_ready = [&] {
+#if VF_GPU3D_SDL
+		if ((cfg.rt_shadows || cfg.rt_gi || cfg.rt_fog || cfg.rt_spot) && !rt_gpu_tried && !getenv("VF_RT_CPU")) {
+			rt_gpu_tried = true;
+			rt_gpu = rt::gpu_create();
+			fprintf(stderr, "ray-traced lighting: %s\n", rt_gpu ? rt_gpu->name() : "on the CPU (no Vulkan device for it)");
+			m.set_rt_gpu(rt_gpu.get());
+		}
+		return rt_gpu != nullptr && !m.rt_gpu_failed();
+#else
+		return false;
+#endif
+	};
+	rt_gpu_ready();
+	m.set_rt(cfg.rt_shadows, cfg.rt_gi, cfg.rt_fog, cfg.rt_spot);
 	auto renderer_name = [&]() -> std::string {
 #if VF_GPU3D_METAL
 		if (!g3 || a3.broken) return "CPU (no GPU here)";
@@ -2053,6 +2091,14 @@ int main(int argc, char **argv)
 	menu.set_footer(std::string("Virtua Fighter Recomp ") + VF_VERSION + (*VF_DATE ? std::string(" \u00b7 ") + VF_DATE : ""));
 	// a new scale or shape reallocates the picture: draw it again at once when the game is stopped
 	auto redraw_if_stopped = [&] { if (paused || menu.is_open()) { m.set_stopped(true); m.redraw(); m.set_stopped(false); still_dirty = true; } };
+	// ray tracing on or off (Display > Ray-traced shadows / lighting, F7 / F8)
+	auto apply_rt = [&](const char *what, bool on) {
+		const bool gpu = rt_gpu_ready();
+		m.set_rt(cfg.rt_shadows, cfg.rt_gi, cfg.rt_fog, cfg.rt_spot);
+		cfg_dirty = true;
+		redraw_if_stopped();
+		if (what) menu.toast(std::string(what) + (on ? (gpu ? ": on (GPU)" : ": on (CPU)") : ": off"), 2);
+	};
 	// Reset (the menu, F3): the menu closes, a paused game unpauses, and the screen goes black at
 	// once while the boot runs unseen (a few seconds on a slow machine), not the last picture held.
 	// the arcade settings as their page opened (and the ring): see arcade_page
@@ -2169,6 +2215,22 @@ int main(int argc, char **argv)
 				menu.toast("");
 			} });
 #endif
+		p.items.push_back({ "Ray-traced shadows",
+			"Real shadows cast by the fighters and the stage, traced from the game's light, instead of the game's dark patches under the fighters. On the GPU (Vulkan) where it can, else on the CPU: keep the render scale at 2x or 3x then. (F7)",
+			[&] { return on_off(cfg.rt_shadows); },
+			[&](int) { cfg.rt_shadows = !cfg.rt_shadows; apply_rt(nullptr, cfg.rt_shadows); } });
+		p.items.push_back({ "Ray-traced lighting",
+			"Global illumination: light bounces off the floor and the fighters onto what's near them, and corners and contact points get softly darker. On the GPU (Vulkan) where it can, else on the CPU: keep the render scale at 2x or 3x then. (F8)",
+			[&] { return on_off(cfg.rt_gi); },
+			[&](int) { cfg.rt_gi = !cfg.rt_gi; apply_rt(nullptr, cfg.rt_gi); } });
+		p.items.push_back({ "Volumetric lighting",
+			"Light through a haze in the air, with shafts where the fighters and the stage block it, brighter looking toward the light. On the GPU (Vulkan) only. (F4)",
+			[&] { return on_off(cfg.rt_fog); },
+			[&](int) { cfg.rt_fog = !cfg.rt_fog; apply_rt(nullptr, cfg.rt_fog); } });
+		p.items.push_back({ "Spotlight",
+			"The light as a spotlight on the fight: full in a pool around the middle of the screen, falling off gently toward the edges and down the fighters toward their feet (the sky as it was). With volumetric lighting, its beam shows in the haze. On the GPU (Vulkan) only. (Shift+F4)",
+			[&] { return on_off(cfg.rt_spot); },
+			[&](int) { cfg.rt_spot = !cfg.rt_spot; apply_rt(nullptr, cfg.rt_spot); } });
 		p.items.push_back({ "Picture shape",
 			"Fit the window fills any screen shape. The other shapes add black bars to keep their shape; 4:3 is the original arcade screen. (F6)",
 			[&] { return std::string(aspect_i ? ASPECT_NAMES[aspect_i] : "Fit the window"); },
@@ -2491,8 +2553,8 @@ int main(int argc, char **argv)
 							const SDL_Scancode k = e.key.scancode == SDL_SCANCODE_BACKSPACE || e.key.scancode == SDL_SCANCODE_DELETE ? SDL_SCANCODE_UNKNOWN : e.key.scancode;
 							// the game's own keys (pause, reset, the menu's shortcuts, the cabinet's coin and
 							// test buttons) stay theirs: wait for another key
-							static const SDL_Scancode RESERVED[] = { SDL_SCANCODE_P, SDL_SCANCODE_TAB, SDL_SCANCODE_F3,
-								SDL_SCANCODE_F5, SDL_SCANCODE_F6, SDL_SCANCODE_F9, SDL_SCANCODE_F11, SDL_SCANCODE_F12 };
+							static const SDL_Scancode RESERVED[] = { SDL_SCANCODE_P, SDL_SCANCODE_TAB, SDL_SCANCODE_F3, SDL_SCANCODE_F4,
+								SDL_SCANCODE_F5, SDL_SCANCODE_F6, SDL_SCANCODE_F7, SDL_SCANCODE_F8, SDL_SCANCODE_F9, SDL_SCANCODE_F10, SDL_SCANCODE_F11, SDL_SCANCODE_F12 };
 							for (SDL_Scancode r : RESERVED) if (k == r) return false;
 							for (const auto &sk : SYS_KEYS) if (k == sk.key) return false;
 							// a key does one thing: take it off whatever had it
@@ -3350,6 +3412,12 @@ int main(int argc, char **argv)
 		const uint64_t pass_t = SDL_GetTicksNS();
 		tp = trace_pass{};
 		const int64_t pass = frames_run++;   // counted in every run: VF_MENU_KEYS and VF_SHOT_AT work without VF_QUIT_AFTER
+		{
+			// testing: VF_RT_AT=n leaves ray tracing off until pass n (a slow software GPU reaches the fight sooner)
+			static const int64_t rt_at = getenv("VF_RT_AT") ? atoll(getenv("VF_RT_AT")) : -1;
+			if (rt_at > 0 && pass == 0) m.set_rt(false, false, false, false);
+			if (rt_at > 0 && pass == rt_at) m.set_rt(cfg.rt_shadows, cfg.rt_gi, cfg.rt_fog, cfg.rt_spot);
+		}
 		if (quit_after >= 0 && pass >= quit_after) {
 			write_png("build/host_last.png", saved_frame(), shown_w(), shown_h());
 			break;
@@ -3452,6 +3520,42 @@ int main(int argc, char **argv)
 				else if (e.key.scancode == SDL_SCANCODE_F3) reset_game();
 				else if (e.key.scancode == SDL_SCANCODE_F5) player_scale_to(cfg.scale % 6 + 1);
 				else if (e.key.scancode == SDL_SCANCODE_F6) set_shape((aspect_i + 1) % N_ASPECTS);
+				else if (e.key.scancode == SDL_SCANCODE_F7) { cfg.rt_shadows = !cfg.rt_shadows; apply_rt("Ray-traced shadows", cfg.rt_shadows); }
+				else if (e.key.scancode == SDL_SCANCODE_F8 && (e.key.mod & SDL_KMOD_SHIFT)) {
+					// Shift+F8: global illumination's parts alone, to see them (not saved)
+					static int view = 0;
+					view = (view + 1) % 3;
+					if (view && !cfg.rt_gi) { cfg.rt_gi = true; apply_rt(nullptr, true); }
+					m.set_rt_view(view);
+					redraw_if_stopped();
+					static const char *names[] = { "Lighting view: the picture", "Lighting view: ambient occlusion only", "Lighting view: bounced light only" };
+					menu.toast(names[view], 2);
+				}
+				else if (e.key.scancode == SDL_SCANCODE_F8) { cfg.rt_gi = !cfg.rt_gi; apply_rt("Ray-traced lighting", cfg.rt_gi); }
+				else if (e.key.scancode == SDL_SCANCODE_F4 && (e.key.mod & SDL_KMOD_SHIFT) && !(e.key.mod & SDL_KMOD_ALT)) {
+					cfg.rt_spot = !cfg.rt_spot;
+					apply_rt("Spotlight", cfg.rt_spot);
+					if (cfg.rt_spot && !rt_gpu_ready()) menu.toast("The spotlight needs the GPU (Vulkan): not available here", 3);
+				}
+				else if (e.key.scancode == SDL_SCANCODE_F4 && !(e.key.mod & SDL_KMOD_ALT)) {
+					cfg.rt_fog = !cfg.rt_fog;
+					apply_rt("Volumetric lighting", cfg.rt_fog);
+					if (cfg.rt_fog && !rt_gpu_ready()) menu.toast("Volumetric lighting needs the GPU (Vulkan): not available here", 3);
+				}
+				else if (e.key.scancode == SDL_SCANCODE_F10 && !m.rt_recording()) {
+					// F10: the next 2 seconds of ray-traced scenes to RT capture in the data folder (for debugging the ray tracer)
+					if (!cfg.rt_shadows && !cfg.rt_gi && !cfg.rt_fog && !cfg.rt_spot) menu.toast("Turn on ray-traced shadows (F7), lighting (F8) or volumetric lighting (F4) first", 3);
+					else {
+						std::error_code ec;
+						int k = 1;
+						std::string out;
+						do out = dir + "/RT capture/" + std::to_string(k++);
+						while (std::filesystem::exists(out, ec) && k < 1000);
+						std::filesystem::create_directories(out, ec);
+						m.rt_record(out, 120);
+						menu.toast("Recording ray-traced scenes (2 seconds)", 3);
+					}
+				}
 				else if (e.key.scancode == SDL_SCANCODE_F12) {
 					// F12: the picture as drawn, into Screenshots in the data folder (numbered, never overwritten)
 					std::error_code ec;
@@ -3961,6 +4065,11 @@ int main(int argc, char **argv)
 		m.set_ranking_names(own_rank_names);
 		g_match_board = false;
 	}
+	// (the ray tracer's GPU device let go of before SDL closes: after it, its destruction crashed)
+	m.set_rt_gpu(nullptr);
+#if VF_GPU3D_SDL
+	rt_gpu.reset();
+#endif
 	if (quit_after >= 0 && !getenv("VF_SAVE")) { SDL_Quit(); return 0; }   // test runs leave the saves and settings alone (VF_SAVE: they save, as a player's)
 	keep_arcade_coins();
 	saver.finish();   // (an autosave still being written, done before the last save: the same files)

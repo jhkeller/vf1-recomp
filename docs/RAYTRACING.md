@@ -8,10 +8,10 @@ Plan: https://claude.ai/artifact/CxsJ2TfuvCrxLyN3LPSvU7
 | Phase | What | State |
 | --- | --- | --- |
 | 1 | Scene capture: every quad in view space, before culling/clipping, with its unlit colour, normal and light mode | Done |
-| 2 | Depth-buffered G-buffer raster, re-lit from the capture to match the game's own shading | Next |
-| 3 | Ray-traced shadows (compute BVH), the game's MOIRE blob shadows off | |
+| 2 | Depth-buffered raster of the capture, in the game's own colours (CPU) | Done |
+| 3 | Ray-traced shadows through a BVH, the game's MOIRE blob shadows off (CPU; GPU compute port to come) | Done (CPU) |
 | 4 | Floor reflections, the sky panorama for misses | |
-| 5 | One-bounce GI, temporal accumulation, denoiser | |
+| 5 | One-bounce GI and ambient occlusion on a coarse grid, kept across pictures (CPU) | Done (CPU) |
 | 6 | Metal, menu settings, tuning | |
 
 ## Phase 1: checking the capture
@@ -31,4 +31,62 @@ nothing changes.
 Code: `src/machine/model1_rt.cpp`, the `rt_*` types in `src/machine/model1.h`, and the hooks in
 `push_object` / `tgp_render` (`src/machine/model1_video.cpp`).
 
+## Phases 2, 3 and 5: the ray-traced renderer
+
+In the game: Display > **Ray-traced shadows** (F7) and **Ray-traced lighting** (F8), saved in
+settings.ini (`rt_shadows`, `rt_gi`). Or from the environment, over the settings:
+
+```
+VF_RT=shadows build/bin/vf-native   # ray-traced shadows instead of the game's blob shadows
+VF_RT=gi      build/bin/vf-native   # and global illumination
+VF_RT=raster  build/bin/vf-native   # the renderer with nothing traced: should look like the arcade's
+```
+
+Global illumination: from points on a grid a few render pixels apart, cosine-weighted rays over the
+hemisphere; a hit brings back the hit polygon's albedo lit by the game's ambient and diffuse (with a
+shadow ray at the hit), and near hits darken the ambient term (ambient occlusion). Each grid point
+keeps 80% of its last value while the same polygon is under it, and pixels take the grid points on
+their own polygon, weighted by distance. A pixel's colour is then
+`shade * occlusion + (lit - shade) * visible + albedo * bounce * 0.6`, so open surfaces keep the
+game's colours exactly.
+
+Code: `src/raytrace/rt_render.cpp` (`rt::render`), called from `model1::rt_end`. Each viewport's
+polygons are drawn with a depth buffer in the game's paint order; each lit pixel then sends a ray
+toward the game's light through a BVH of every polygon in its viewport, culled ones included. A
+pixel in shadow takes the colour the game would give it with only the ambient light (captured per
+polygon as `rt::quad::shade`). It runs on the GPU where Vulkan is there (below), else on the CPU, threaded by rows. `VF_RT` turns the GPU 3D renderer
+off for that run.
+
+`build/bin/rttest [dir]` draws a made-up scene (no ROM) both ways, checks pixels in and out of
+shadow, and writes `rt_raster.ppm` / `rt_shadows.ppm`.
+
+With shadows or lighting on, **F10** in the game records the next 120 scenes the ray tracer draws
+(about 2 seconds) to `RT capture/<n>/scene_NNNN.rts` in the data folder. `build/bin/rttest --scene
+<raster|shadows|gi|both> <out dir> scene_*.rts` draws them again in order, away from the game,
+writing each picture as a PPM and timing each, to chase flicker or speed with the real scenes.
+
+Steadiness: polygons in one plane (a floor and its markings) are drawn in the game's painted order
+whatever their rounded depths, and don't shadow each other; the light's side, decided by the
+polygons' votes, flips only when they're clearly the other way. Speed: shadow rays go from every
+other pixel each way first, and the pixels between ones that agree on the same polygon take their
+answer; global illumination traces half its points each picture (a checkerboard) where the surface
+under them hasn't changed.
+
 Known limits: culled polygons take their palette colour, without the random fighters' recolouring.
+
+## On the GPU
+
+`src/raytrace/rt_gpu.cpp` draws the same picture with compute kernels (`rt_gpu.comp`, GLSL, built
+into `rt_gpu_shaders.h` by `tools/gpu/rt_shaders.sh` with glslang: the builds don't need it) on a
+Vulkan device of its own through SDL_GPU. The CPU still makes each view ready
+(`rt::detail::prepare`: polygons in painted order and projected, their planes, the BVH, the light's
+side) and lists each triangle's rows; the GPU rasters them (an atomic maximum of depth, then which
+triangle is nearest, then the last painted of those level with it or in its plane), traces the
+global illumination grid and the shadows, and colours each pixel; the result comes back into the
+picture. The game makes it the first time ray tracing is turned on; the toast says GPU or CPU. No
+Vulkan, a failed picture (the CPU from then on), or `VF_RT_CPU=1`: the CPU's.
+
+`make build/bin/rttest-gpu` runs rttest's checks (and `--scene`) on it; with Mesa's lavapipe it runs
+without a graphics card. Raster and shadows come out pixel for pixel as the CPU's; global
+illumination differs only by its noise. Debugging: `RT_GPU_SKIP=<bits>` leaves kernels out,
+`RT_GPU_SPV_DIR=build/shaders/rt` loads freshly built kernels without rebuilding.

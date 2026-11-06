@@ -1,0 +1,613 @@
+// Ray-traced lighting on the GPU (src/raytrace/rt_gpu.cpp drives it): rt_render.cpp's passes as
+// compute kernels, one built per -D K_* by tools/gpu/rt_shaders.sh (glslang, GLSL to SPIR-V for
+// SDL_GPU's Vulkan) into rt_gpu_shaders.h. The CPU makes each view ready (rt::detail::prepare: the
+// polygons in painted order, projected; their planes; the BVH; the light's side) and the rows each
+// triangle covers (jobs); here:
+//  - K_CLEAR    a view's pixels' depth, nearest, polygon, shadow and game-shadow words (or the
+//               picture's results, flag CLEAR_OUT);
+//  - K_DEPTH    a job's row: each pixel's nearest depth (1/z, an atomic maximum of its bits);
+//  - K_NEAR     which triangle is that nearest (the last painted of those exactly there);
+//  - K_ID       which triangle shows: the last painted of those as near as the nearest, or in its
+//               plane (a floor's markings), as the CPU's raster has it;
+//  - K_MOIRE    the game's shadow polygons: the first over each pixel (blended), or the last (1x's checkerboard);
+//  - K_GI       global illumination's grid points (kept from picture to picture in GRID);
+//  - K_SHADOW   the shadow rays from every other pixel each way;
+//  - K_FOG      volumetric lighting: from points a game pixel apart, the view ray marched through the
+//               haze to what it meets, each step's light seen or blocked (a shadow ray), kept in FOG;
+//  - K_COLOUR   each pixel's colour into OUT: bit 31 a colour, bit 30 a game's shadow over what the
+//               CPU has there (its half colour), bit 24 the shadow's mark.
+#version 450
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// SDL_GPU's compute layout for SPIR-V: read-only storage buffers set 0, read-write set 1, uniforms set 2
+layout(std430, set = 0, binding = 0) readonly buffer B_TRIS { uint TRIS[]; };     // 16 words a triangle: x0 y0 w0 x1 y1 w1 x2 y2 w2 area minx maxx miny maxy quad -
+layout(std430, set = 0, binding = 1) readonly buffer B_JOBS { uint JOBS[]; };     // 2 words: triangle, row
+layout(std430, set = 0, binding = 2) readonly buffer B_QUADS { uint QUADS[]; };   // 8 words a polygon: lit shade albedo flags|lightmode<<8, plane nx ny nz d
+layout(std430, set = 0, binding = 3) readonly buffer B_NODES { uint NODES[]; };   // 8 words: lo.xyz left hi.xyz first<<3|count
+layout(std430, set = 0, binding = 4) readonly buffer B_BTRIS { uint BTRIS[]; };   // 16 words: p0 e1 e2 n (xyz each) quad - - -
+layout(std430, set = 0, binding = 5) readonly buffer B_LIGHTS { uint LIGHTS[]; }; // 4 words a light mode: a d s p
+layout(std430, set = 1, binding = 0) buffer B_DEPTH { uint DEPTH[]; };
+layout(std430, set = 1, binding = 1) buffer B_NEAR { uint NEAR[]; };
+layout(std430, set = 1, binding = 2) buffer B_ID { uint IDB[]; };                  // triangle + 1 (0: none)
+layout(std430, set = 1, binding = 3) buffer B_VIS { uint VIS[]; };                 // 0 not traced, 1 lit, 2 in shadow
+layout(std430, set = 1, binding = 4) buffer B_MOIRE { uint MOIRE[]; };
+layout(std430, set = 1, binding = 5) buffer B_OUT { uint OUT[]; };
+layout(std430, set = 1, binding = 6) buffer B_GRID { uint GRID[]; };               // 12 words a point: id ao r g b nx ny nz z - - -
+layout(std430, set = 1, binding = 7) buffer B_FOG { uint FOG[]; };                 // 4 words a point: light scattered in, light let through, depth, -
+layout(std140, set = 2, binding = 0) uniform U
+{
+	uvec4 u0;   // stride, clip x0 y0 x1
+	uvec4 u1;   // clip y1, threads, first job, flags
+	vec4 v0;    // xc yc zoomx zoomy
+	vec4 v1;    // viewx viewy ext scale
+	vec4 lt;    // toward the light xyz, the light vector's length
+	uvec4 g0;   // grid step, w, h, rays a point
+	uvec4 g1;   // picture, grid x0 y0, the solid triangles (the game's shadows' after)
+	vec4 g2;    // scene diagonal, gi strength, ao strength, ao's share of the direct light
+	uvec4 k0;   // key, shadow key, mark, view (0 the picture; 1 ambient occlusion alone, 2 bounced light alone)
+	vec4 x0;    // ao radius (a share of the depth), haze density (per unit of depth), haze brightness, the view's typical depth
+	uvec4 x1;   // haze grid step, w, h, steps a ray
+	vec4 x2;    // spotlight: full light out to, the least past (shares of the typical depth from its axis), the ambient outside, the direct light outside
+	vec4 x3;    // spotlight: the floor's normal (up), its height along it
+	vec4 x4;    // spotlight: the light's height over the floor, the height lit fully
+	vec4 x5;    // spotlight: the sky's colour, how far the light outside the pool takes it
+};
+#define AO_RADIUS x0.x
+#define STRIDE u0.x
+#define CX0 int(u0.y)
+#define CY0 int(u0.z)
+#define CX1 int(u0.w)
+#define CY1 int(u1.x)
+#define NTHREADS u1.y
+#define JOB0 u1.z
+#define FLAGS u1.w
+#define F_TRACE 1u
+#define F_GI 2u
+#define F_GAME_SHADOWS 4u
+#define F_BLEND 8u
+#define F_CLEAR_OUT 16u
+#define F_FOG 32u
+#define F_SPOT 64u
+
+const float DEPTH_EPS = 2e-5;
+const float LAYER_EPS = 2e-3;
+const uint MOIRE_F = 1u, UNLIT_F = 8u;
+
+uint thread_index() { return gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * 64u; }
+float fl(uint w) { return uintBitsToFloat(w); }
+vec3 tri3(uint base) { return vec3(fl(BTRIS[base]), fl(BTRIS[base + 1u]), fl(BTRIS[base + 2u])); }
+vec4 plane_of(uint q) { return vec4(fl(QUADS[q * 8u + 4u]), fl(QUADS[q * 8u + 5u]), fl(QUADS[q * 8u + 6u]), fl(QUADS[q * 8u + 7u])); }
+uint quad_of_tri(uint t) { return TRIS[t * 16u + 14u]; }
+
+// ---- a job's row of pixels: rt_detail.h's scan ----
+struct span { int x0; int x1; float aw; float bw; float cw; float py; bool any; };
+span row_span(uint t, int y)
+{
+	span s;
+	s.any = false;
+	const uint b = t * 16u;
+	float X[3], Y[3], W[3];
+	for (int i = 0; i < 3; i++) { X[i] = fl(TRIS[b + uint(i) * 3u]); Y[i] = fl(TRIS[b + uint(i) * 3u + 1u]); W[i] = fl(TRIS[b + uint(i) * 3u + 2u]); }
+	const float inv = 1.0 / fl(TRIS[b + 9u]);
+	const int minx = int(TRIS[b + 10u]), maxx = int(TRIS[b + 11u]);
+	float A[3], Bc[3], C[3];
+	for (int i = 0; i < 3; i++) {
+		const int j = (i + 1) % 3, k = (i + 2) % 3;
+		A[i] = (Y[j] - Y[k]) * inv;
+		Bc[i] = (X[k] - X[j]) * inv;
+		C[i] = (X[j] * Y[k] - X[k] * Y[j]) * inv;
+	}
+	s.aw = A[0] * W[0] + A[1] * W[1] + A[2] * W[2];
+	s.bw = Bc[0] * W[0] + Bc[1] * W[1] + Bc[2] * W[2];
+	s.cw = C[0] * W[0] + C[1] * W[1] + C[2] * W[2];
+	const float tol = -1e-6;
+	const float py = float(y) + 0.5;
+	s.py = py;
+	float xl = float(minx) + 0.5, xr = float(maxx) + 0.5;
+	for (int i = 0; i < 3; i++) {
+		const float r = Bc[i] * py + C[i];
+		if (A[i] > 0.0) xl = max(xl, -r / A[i]);
+		else if (A[i] < 0.0) xr = min(xr, -r / A[i]);
+		else if (r < tol) return s;
+	}
+	if (xl > xr) return s;
+	int x0 = max(minx, int(ceil(xl - 0.5)));
+	int x1 = min(maxx, int(floor(xr - 0.5)));
+	// (the ends by the weights themselves)
+	if (x0 - 1 >= minx) {
+		const float px = float(x0 - 1) + 0.5;
+		bool inside = true;
+		for (int i = 0; i < 3; i++) if (A[i] * px + Bc[i] * py + C[i] < tol) inside = false;
+		if (inside) x0--;
+	}
+	if (x1 + 1 <= maxx) {
+		const float px = float(x1 + 1) + 0.5;
+		bool inside = true;
+		for (int i = 0; i < 3; i++) if (A[i] * px + Bc[i] * py + C[i] < tol) inside = false;
+		if (inside) x1++;
+	}
+	s.x0 = x0; s.x1 = x1;
+	s.any = x0 <= x1;
+	return s;
+}
+
+bool one_plane(uint p, uint q, float w)
+{
+	const vec4 a = plane_of(p), c = plane_of(q);
+	const float d = dot(a.xyz, c.xyz);
+	if (abs(d) < 0.999) return false;
+	return abs(a.w - (d > 0.0 ? c.w : -c.w)) < LAYER_EPS / w;
+}
+
+// ---- the rays: rt_detail.h's bvh ----
+vec3 safe_inv(vec3 d)
+{
+	const float e = 1e-20;
+	return vec3(1.0 / (abs(d.x) > e ? d.x : (d.x < 0.0 ? -e : e)), 1.0 / (abs(d.y) > e ? d.y : (d.y < 0.0 ? -e : e)), 1.0 / (abs(d.z) > e ? d.z : (d.z < 0.0 ? -e : e)));
+}
+bool slab(uint n, vec3 o, vec3 inv, float tmin, float tmax)
+{
+	const uint b = n * 8u;
+	const vec3 lo = vec3(fl(NODES[b]), fl(NODES[b + 1u]), fl(NODES[b + 2u]));
+	const vec3 hi = vec3(fl(NODES[b + 4u]), fl(NODES[b + 5u]), fl(NODES[b + 6u]));
+	const vec3 ta = (lo - o) * inv, tb = (hi - o) * inv;
+	const vec3 t0 = min(ta, tb), t1 = max(ta, tb);
+	const float a = max(max(t0.x, t0.y), max(t0.z, tmin));
+	const float c = min(min(t1.x, t1.y), min(t1.z, tmax));
+	return a <= c;
+}
+// Moller-Trumbore, both faces: the distance along the ray (or -1)
+float hit_tri(uint i, vec3 o, vec3 d, uint skip, vec3 on, float tol)
+{
+	const uint b = i * 16u;
+	if (BTRIS[b + 12u] == skip) return -1.0;
+	const vec3 p0 = tri3(b), e1 = tri3(b + 3u), e2 = tri3(b + 6u), n = tri3(b + 9u);
+	if (abs(dot(n, on - p0)) < tol) return -1.0;   // (in the plane the ray leaves: a floor's markings)
+	const vec3 p = cross(d, e2);
+	const float det = dot(e1, p);
+	if (abs(det) < 1e-12) return -1.0;
+	const float id = 1.0 / det;
+	const vec3 s = o - p0;
+	const float u = dot(s, p) * id;
+	if (u < 0.0 || u > 1.0) return -1.0;
+	const vec3 q = cross(s, e1);
+	const float v = dot(d, q) * id;
+	if (v < 0.0 || u + v > 1.0) return -1.0;
+	return dot(e2, q) * id;
+}
+// The nearest hit along o + t d (t > 0), or with `any` the first found. One function for both, and
+// each kernel calls it from one place: some drivers (llvmpipe) fail on two traversals in one loop.
+bool trace(vec3 o, vec3 d, uint skip, vec3 on, float tol, bool any, out float th, out uint hq)
+{
+	const vec3 inv = safe_inv(d);
+	int stack[48];
+	int sp = 0;
+	stack[sp++] = 0;
+	float best = 1e30;
+	uint found = 0xffffffffu;
+	while (sp > 0) {
+		const uint n = uint(stack[--sp]);
+		if (!slab(n, o, inv, 0.0, best)) continue;
+		const int left = int(NODES[n * 8u + 3u]);
+		if (left < 0) {
+			const uint fc = NODES[n * 8u + 7u], first = fc >> 3, count = fc & 7u;
+			for (uint i = first; i < first + count; i++) {
+				const float t = hit_tri(i, o, d, skip, on, tol);
+				if (t > 0.0 && t < best) { best = t; found = BTRIS[i * 16u + 12u]; }
+			}
+			if (any && found != 0xffffffffu) break;
+		} else if (sp + 2 <= 48) {
+			stack[sp++] = left;
+			stack[sp++] = left + 1;
+		}
+	}
+	th = best;
+	hq = found;
+	return found != 0xffffffffu;
+}
+
+// ---- a pixel's surface ----
+vec3 place(float sx, float sy, float depth)
+{
+	const float z = 1.0 / depth;
+	return vec3((sx / v1.w - v1.z - v0.x - v1.x) / v0.z * z, (v0.y - sy / v1.w - v1.y) / v0.w * z, z);
+}
+// The spotlight at a point: x its cone (1 on its axis, its edge share outside), y the light there
+// (on what isn't floor, less further below the light than the height lit fully: a point light over
+// the floor at the view's centre, shining straight down)
+vec2 spot_of(vec3 P, bool floor_)
+{
+	if ((FLAGS & F_SPOT) == 0u) return vec2(1.0);
+	const vec3 C = place(0.5 * float(CX0 + CX1 + 1), 0.5 * float(CY0 + CY1 + 1), 1.0 / x0.w);
+	const vec3 d = P - C, U = x3.xyz;
+	const float H = x4.x, below = max(H - (dot(P, U) - x3.w), 0.2 * H);   // (the light's height over the point)
+	const float r = length(d - U * dot(d, U)) / x0.w * H / below;          // (the cone widening toward the floor)
+	const float cone = mix(1.0, x2.w, smoothstep(x2.x, x2.y, r));
+	const float full = H - x4.y;
+	return vec2(cone, floor_ ? cone : cone * clamp(full * full / (below * below), 0.45, 1.0));
+}
+float spot_at(vec3 P) { return spot_of(P, true).y; }
+vec3 facing(uint q, vec3 toward)
+{
+	const vec3 n = plane_of(q).xyz;
+	return dot(n, toward) < 0.0 ? -n : n;
+}
+float eps_at(float z) { return 1.5 * abs(z) / (abs(v0.z) * v1.w + 1e-6); }
+int pixel_quad(uint i) { const uint id = IDB[i]; return id == 0u ? -1 : int(quad_of_tri(id - 1u)); }
+vec3 rgb_of(uint c) { return vec3(float((c >> 16) & 255u), float((c >> 8) & 255u), float(c & 255u)) / 255.0; }
+uint pack_rgb(vec3 c)
+{
+	const uvec3 u = uvec3(clamp(c, 0.0, 1.0) * 255.0 + 0.5);
+	return (u.x << 16) | (u.y << 8) | u.z;
+}
+uint hash32(uint x)
+{
+	x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16;
+	return x;
+}
+float unit_rand(inout uint s) { s = hash32(s + 0x9e3779b9u); return float(s >> 8) * (1.0 / 16777216.0); }
+
+uint pixel_at(int x, int y) { return uint(y) * STRIDE + uint(x); }
+
+#ifdef K_CLEAR
+void main()
+{
+	const uint t = thread_index();
+	if (t >= NTHREADS) return;
+	const uint w = uint(CX1 - CX0 + 1);
+	const uint i = pixel_at(CX0 + int(t % w), CY0 + int(t / w));
+	if ((FLAGS & F_CLEAR_OUT) != 0u) { OUT[i] = 0u; return; }
+	DEPTH[i] = 0u; NEAR[i] = 0u; IDB[i] = 0u; VIS[i] = 0u;
+	MOIRE[i] = (FLAGS & F_BLEND) != 0u ? 0xffffffffu : 0u;
+}
+#endif
+
+#if defined(K_DEPTH) || defined(K_NEAR) || defined(K_ID) || defined(K_MOIRE)
+void main()
+{
+	const uint j = thread_index();
+	if (j >= NTHREADS) return;
+	const uint t = JOBS[(JOB0 + j) * 2u], y = JOBS[(JOB0 + j) * 2u + 1u];
+	const span s = row_span(t, int(y));
+	if (!s.any) return;
+#if defined(K_ID)
+	const uint quad = quad_of_tri(t);
+#endif
+	for (int x = s.x0; x <= s.x1; x++) {
+		const float w = s.aw * (float(x) + 0.5) + s.bw * s.py + s.cw;
+		if (w <= 0.0) continue;
+		const uint i = pixel_at(x, int(y));
+#if defined(K_DEPTH)
+		atomicMax(DEPTH[i], floatBitsToUint(w));
+#elif defined(K_NEAR)
+		if (floatBitsToUint(w) == DEPTH[i]) atomicMax(NEAR[i], t + 1u);
+#elif defined(K_ID)
+		const float d = fl(DEPTH[i]);
+		const uint nr = NEAR[i];
+		if (w * (1.0 + DEPTH_EPS) >= d || (w * (1.0 + 4.0 * LAYER_EPS) >= d && nr != 0u && one_plane(quad_of_tri(nr - 1u), quad, w)))
+			atomicMax(IDB[i], t + 1u);
+#else
+		if (w * (1.0 + DEPTH_EPS) < fl(DEPTH[i])) continue;
+		if ((FLAGS & F_BLEND) != 0u) atomicMin(MOIRE[i], t);
+		else if (((x ^ int(y)) & 1) == 0) atomicMax(MOIRE[i], t + 1u);
+#endif
+	}
+}
+#endif
+
+#ifdef K_GI
+void main()
+{
+	const uint gi = thread_index();
+	if (gi >= NTHREADS) return;
+	const uint gw = g0.y, g = g0.x;
+	const uint gx = gi % gw, gy = gi / gw;
+	const int x = min(CX1, CX0 + int(gx * g + g / 2u)), y = min(CY1, CY0 + int(gy * g + g / 2u));
+	const uint i = pixel_at(x, y);
+	const uint b = gi * 12u;
+	const int qs = pixel_quad(i);
+	if (qs < 0 || (QUADS[uint(qs) * 8u + 3u] & UNLIT_F) != 0u) { GRID[b] = 0xffffffffu; return; }
+	const uint qi = uint(qs);
+	const vec3 P = place(float(x) + 0.5, float(y) + 0.5, fl(DEPTH[i]));
+	const vec3 N = facing(qi, -P);
+	const uint pic = g1.x;
+	const bool had = GRID[b] != 0xffffffffu;
+	const bool same = had && GRID[b] == qi;
+	const vec3 on = vec3(fl(GRID[b + 5u]), fl(GRID[b + 6u]), fl(GRID[b + 7u]));
+	const bool like = had && dot(on, N) > 0.95 && abs(fl(GRID[b + 8u]) - P.z) < 0.03 * P.z;
+	GRID[b + 5u] = floatBitsToUint(N.x); GRID[b + 6u] = floatBitsToUint(N.y); GRID[b + 7u] = floatBitsToUint(N.z); GRID[b + 8u] = floatBitsToUint(P.z);
+	if ((same || like) && ((gx + gy + pic) & 1u) != 0u) { GRID[b] = qi; return; }   // (its turn next picture)
+	const float tol = eps_at(P.z);
+	const vec3 O = P + N * tol;
+	const float near = min(0.15 * g2.x, AO_RADIUS * P.z);
+	const vec3 T = abs(N.x) < 0.9 ? cross(N, vec3(1, 0, 0)) : cross(N, vec3(0, 1, 0));
+	const vec3 Tn = normalize(T);
+	const vec3 B = cross(N, Tn);
+	uint seed = hash32((gx * 73856093u) ^ (gy * 19349663u) ^ (pic * 83492791u));
+	const uint nrays = max(1u, g0.w);
+	float occluded = 0.0;
+	vec3 bounce = vec3(0);
+	const vec3 L = lt.xyz;
+	// each ray over the hemisphere, then (where what it hit faces the light) one toward the light from there
+	uint r = 0u;
+	bool to_light = false;
+	vec3 H = vec3(0), Nh = vec3(0);
+	uint hit_q = 0u;
+	float lambert = 0.0;
+	for (uint step = 0u; step < 2u * nrays && r < nrays; step++) {
+		vec3 o, d, on;
+		uint skip;
+		float tl;
+		if (!to_light) {
+			const float u1 = (float(r) + unit_rand(seed)) / float(nrays), u2 = unit_rand(seed);
+			const float rad = sqrt(u1), phi = 6.2831853 * u2;
+			d = Tn * (rad * cos(phi)) + B * (rad * sin(phi)) + N * sqrt(max(0.0, 1.0 - u1));
+			o = O; on = P; skip = qi; tl = tol;
+		} else {
+			const float e = eps_at(H.z);
+			o = H + Nh * e; d = L; on = H; skip = hit_q; tl = e;
+		}
+		float th;
+		uint hq;
+		const bool hit = trace(o, d, skip, on, tl, to_light, th, hq);
+		if (!to_light) {
+			if (!hit) { r++; continue; }   // (open sky: the ambient light as it is)
+			if (th < near) occluded += 1.0 - th / near;
+			H = O + d * th;
+			hit_q = hq;
+			Nh = facing(hq, -d);
+			lambert = lt.w > 0.0 ? max(0.0, dot(Nh, L)) : 0.0;
+			if (lambert > 0.0) { to_light = true; continue; }
+		} else {
+			if (hit) lambert = 0.0;
+			to_light = false;
+		}
+		const uint lm = (QUADS[hit_q * 8u + 3u] >> 8) & 255u;
+		const float la = fl(LIGHTS[lm * 4u]), ld = fl(LIGHTS[lm * 4u + 1u]);
+		bounce += rgb_of(QUADS[hit_q * 8u + 2u]) * min(1.0, la + ld * lambert);
+		r++;
+	}
+	const float ao = 1.0 - occluded / float(nrays);
+	bounce /= float(nrays);
+	const float keep = same ? 0.92 : like ? 0.75 : 0.0;
+	GRID[b + 1u] = floatBitsToUint(fl(GRID[b + 1u]) * keep + ao * (1.0 - keep));
+	for (uint c = 0u; c < 3u; c++) GRID[b + 2u + c] = floatBitsToUint(fl(GRID[b + 2u + c]) * keep + bounce[c] * (1.0 - keep));
+	GRID[b] = qi;
+}
+#endif
+
+bool needs_ray(uint q)
+{
+	if ((FLAGS & F_TRACE) == 0u) return false;
+	const uint fl_ = QUADS[q * 8u + 3u];
+	return QUADS[q * 8u + 1u] != QUADS[q * 8u] && (fl_ & UNLIT_F) == 0u;
+}
+uint shadow_ray(int x, int y, uint i, uint q)
+{
+	const vec3 P = place(float(x) + 0.5, float(y) + 0.5, fl(DEPTH[i]));
+	const vec3 N = facing(q, -P);
+	const vec3 L = lt.xyz;
+	if (dot(N, L) <= 0.0) return 1u;
+	const float e = eps_at(P.z);
+	float th;
+	uint hq;
+	return trace(P + N * e + L * e, L, q, P, 2.0 * e, true, th, hq) ? 2u : 1u;
+}
+
+#ifdef K_SHADOW
+void main()
+{
+	const uint t = thread_index();
+	if (t >= NTHREADS) return;
+	const uint hw = uint(CX1 - CX0) / 2u + 1u;
+	const int x = CX0 + int(t % hw) * 2, y = CY0 + int(t / hw) * 2;
+	const uint i = pixel_at(x, y);
+	const int q = pixel_quad(i);
+	VIS[i] = q < 0 || !needs_ray(uint(q)) ? 0u : shadow_ray(x, y, i, uint(q));
+}
+#endif
+
+#ifdef K_FOG
+void main()
+{
+	const uint t = thread_index();
+	if (t >= NTHREADS) return;
+	const uint step = x1.x, fw = x1.y;
+	const uint fx = t % fw, fy = t / fw;
+	const int x = min(CX1, CX0 + int(fx * step + step / 2u)), y = min(CY1, CY0 + int(fy * step + step / 2u));
+	const uint i = pixel_at(x, y);
+	const uint b = t * 4u;
+	// (nothing drawn there, the sky behind: the haze as far as twice the view's typical depth)
+	const bool sky = IDB[i] == 0u;
+	const vec3 P = sky ? place(float(x) + 0.5, float(y) + 0.5, 1.0 / (2.0 * x0.w)) : place(float(x) + 0.5, float(y) + 0.5, fl(DEPTH[i]));
+	const float dist = length(P);
+	const vec3 dir = P / dist;
+	const vec3 L = lt.xyz;
+	const float sigma = x0.y;
+	const uint steps = max(1u, x1.w);
+	uint seed = hash32(t * 2654435761u ^ g1.x * 83492791u);
+	const float jitter = unit_rand(seed);
+	const float dt = dist / float(steps);
+	float scattered = 0.0;
+	for (uint k = 0u; k < steps; k++) {
+		const float tk = (float(k) + jitter) * dt;
+		const vec3 S = dir * tk;
+		float th;
+		uint hq;
+		const bool blocked = lt.w > 0.0 && trace(S, L, 0xffffffffu, S, 0.0, true, th, hq);
+		if (!blocked) scattered += exp(-sigma * tk) * sigma * dt * spot_at(S);
+	}
+	// forward scattering (Henyey-Greenstein, g 0.6, isotropic as 1, at most 4): brighter looking toward the light
+	const float g = 0.6, ct = dot(dir, L);
+	scattered *= min(4.0, (1.0 - g * g) / pow(max(1e-4, 1.0 + g * g - 2.0 * g * ct), 1.5));
+	const float through = exp(-sigma * dist);
+	// kept from the pictures before where the depth there is much the same (the steps' jitter averaged out)
+	const float z0 = fl(FOG[b + 2u]), zs = sky ? -1.0 : P.z;
+	const float keep = sky ? (z0 < 0.0 ? 0.8 : 0.0) : (abs(z0 - P.z) < 0.03 * P.z ? 0.8 : 0.0);
+	FOG[b] = floatBitsToUint(fl(FOG[b]) * keep + scattered * (1.0 - keep));
+	FOG[b + 1u] = floatBitsToUint(fl(FOG[b + 1u]) * keep + through * (1.0 - keep));
+	FOG[b + 2u] = floatBitsToUint(zs);
+}
+#endif
+
+#ifdef K_COLOUR
+// The haze at a pixel: the points around it at about its depth, weighed by nearness
+bool fog_at(int x, int y, float z, out float scattered, out float through)
+{
+	const int step = int(x1.x), fw = int(x1.y), fh = int(x1.z);
+	const float fx = float(x - CX0 - step / 2) / float(step), fy = float(y - CY0 - step / 2) / float(step);
+	const int fx0 = int(floor(fx)), fy0 = int(floor(fy));
+	float wsum = 0.0, sc = 0.0, th = 0.0;
+	for (int dy = 0; dy <= 1; dy++)
+		for (int dx = 0; dx <= 1; dx++) {
+			const int gx = clamp(fx0 + dx, 0, fw - 1), gy = clamp(fy0 + dy, 0, fh - 1);
+			const uint b = uint(gy * fw + gx) * 4u;
+			const float gz = fl(FOG[b + 2u]);
+			if (gz == 0.0 || (gz < 0.0) != (z < 0.0)) continue;   // (the sky's (z -1) with the sky's only)
+			const float w = (1.0 - abs(fx - float(fx0 + dx))) * (1.0 - abs(fy - float(fy0 + dy))) + 1e-3;
+			const float dz = z < 0.0 ? 0.0 : abs(gz - z) / (0.05 * z);
+			const float wz = w * max(0.0, 1.0 - dz) + 1e-6 * w;
+			wsum += wz;
+			sc += fl(FOG[b]) * wz;
+			th += fl(FOG[b + 1u]) * wz;
+		}
+	if (wsum <= 0.0) return false;
+	scattered = sc / wsum;
+	through = th / wsum;
+	return true;
+}
+bool gi_at(int x, int y, uint qi, vec3 N, float z, out float ao, out vec3 bounce)
+{
+	const int step = int(g0.x), gw = int(g0.y), gh = int(g0.z);
+	const float fx = float(x - int(g1.y) - step / 2) / float(step), fy = float(y - int(g1.z) - step / 2) / float(step);
+	const int gx0 = int(floor(fx)), gy0 = int(floor(fy));
+	float wsum = 0.0, a = 0.0;
+	vec3 c = vec3(0);
+	for (int dy = -3; dy <= 4; dy++)
+		for (int dx = -3; dx <= 4; dx++) {
+			const int gx = gx0 + dx, gy = gy0 + dy;
+			if (gx < 0 || gy < 0 || gx >= gw || gy >= gh) continue;
+			const uint b = uint(gy * gw + gx) * 12u;
+			const uint id = GRID[b];
+			if (id == 0xffffffffu) continue;
+			float like = 1.0;
+			if (id != qi) {
+				const float nd = dot(vec3(fl(GRID[b + 5u]), fl(GRID[b + 6u]), fl(GRID[b + 7u])), N);
+				if (nd < 0.7) continue;
+				const float dz = abs(fl(GRID[b + 8u]) - z) / (0.05 * z);
+				if (dz >= 1.0) continue;
+				like = (nd - 0.7) / 0.3 * (1.0 - dz) * 0.5;
+			}
+			const float ddx = fx - float(gx), ddy = fy - float(gy);
+			const float w = like * exp(-0.18 * (ddx * ddx + ddy * ddy));
+			wsum += w;
+			a += fl(GRID[b + 1u]) * w;
+			c += vec3(fl(GRID[b + 2u]), fl(GRID[b + 3u]), fl(GRID[b + 4u])) * w;
+		}
+	if (wsum <= 1e-4) { ao = 1.0; bounce = vec3(0); return false; }
+	ao = a / wsum;
+	bounce = c / wsum;
+	return true;
+}
+void main()
+{
+	const uint t = thread_index();
+	if (t >= NTHREADS) return;
+	const uint cw = uint(CX1 - CX0 + 1);
+	const int x = CX0 + int(t % cw), y = CY0 + int(t / cw);
+	const uint i = pixel_at(x, y);
+	const int qs = pixel_quad(i);
+	uint res = 0u;
+	if (qs >= 0) {
+		const uint q = uint(qs);
+		bool lit = true;
+		if (needs_ray(q)) {
+			const bool xodd = ((x - CX0) & 1) != 0, yodd = ((y - CY0) & 1) != 0;
+			uint vis = (!xodd && !yodd) ? VIS[i] : 0u;
+			if (xodd || yodd) {
+				// the traced pixels around it: on its polygon and all agreeing?
+				const int xs0 = xodd ? x - 1 : x, xs1 = xodd && x + 1 <= CX1 ? x + 1 : xs0;
+				const int ys0 = yodd ? y - 1 : y, ys1 = yodd && y + 1 <= CY1 ? y + 1 : ys0;
+				const int XS[2] = int[2](xs0, xs1), YS[2] = int[2](ys0, ys1);
+				uint got = 0u;
+				bool ok = true;
+				for (int a = 0; a < 2 && ok; a++)
+					for (int c = 0; c < 2 && ok; c++) {
+						const uint j = pixel_at(XS[c], YS[a]);
+						const uint v = VIS[j];
+						if (pixel_quad(j) != qs || v == 0u || (got != 0u && v != got)) ok = false;
+						else got = v;
+					}
+				if (ok) vis = got;
+			}
+			if (vis == 0u) vis = shadow_ray(x, y, i, q);
+			lit = vis != 2u;
+		}
+		const uint qlit = QUADS[q * 8u], qshade = QUADS[q * 8u + 1u];
+		uint c = lit ? qlit : qshade;
+		// the spotlight: the direct light by it, the ambient down to its share outside the pool
+		const vec2 so = spot_of(place(float(x) + 0.5, float(y) + 0.5, fl(DEPTH[i])), abs(dot(plane_of(q).xyz, x3.xyz)) > 0.98);
+		const float spot = so.y;
+		const float sa = mix(x2.z, 1.0, (so.x - x2.w) / max(1e-4, 1.0 - x2.w));
+		if ((FLAGS & F_SPOT) != 0u) {
+			const vec3 amb = rgb_of(qshade);
+			c = pack_rgb(amb * sa + (lit ? max(rgb_of(qlit) - amb, vec3(0)) * spot : vec3(0)));
+		}
+		if ((FLAGS & F_GI) != 0u && (QUADS[q * 8u + 3u] & UNLIT_F) == 0u) {
+			const vec3 P = place(float(x) + 0.5, float(y) + 0.5, fl(DEPTH[i]));
+			float ao;
+			vec3 bounce;
+			if (gi_at(x, y, q, facing(q, -P), P.z, ao, bounce)) {
+				const vec3 amb = rgb_of(qshade), full = rgb_of(qlit), alb = rgb_of(QUADS[q * 8u + 2u]);
+				const vec3 direct = lit ? max(full - amb, vec3(0)) : vec3(0);
+				const float occ = 1.0 - g2.z * (1.0 - ao), docc = 1.0 - g2.w * g2.z * (1.0 - ao);
+				// the bounced light: its colour pushed a little further, mostly where the light doesn't reach
+				// (what's lit fully already gets a share, so it doesn't wash out)
+				const float bl = dot(bounce, vec3(0.299, 0.587, 0.114));
+				const vec3 add = alb * max(mix(vec3(bl), bounce, 1.3), vec3(0)) * g2.y * (lit ? 0.4 : 1.0);
+				c = pack_rgb(k0.w == 1u ? vec3(occ) : k0.w == 2u ? add : (amb * occ + add) * sa + direct * docc * spot);
+			}
+		}
+		// outside the pool the light the sky's colour (a share, the brightness kept)
+		if ((FLAGS & F_SPOT) != 0u && x5.w > 0.0) {
+			const vec3 sky = x5.rgb / max(1e-3, max(x5.r, max(x5.g, x5.b)));
+			vec3 tint = mix(vec3(1.0), sky, x5.w * clamp((1.0 - so.x) / max(1e-4, 1.0 - x2.w), 0.0, 1.0));
+			tint /= max(1e-3, dot(tint, vec3(0.299, 0.587, 0.114)));
+			c = pack_rgb(rgb_of(c) * tint);
+		}
+		if ((FLAGS & F_FOG) != 0u) {
+			const vec3 P = place(float(x) + 0.5, float(y) + 0.5, fl(DEPTH[i]));
+			float sc, th;
+			if (fog_at(x, y, P.z, sc, th)) {
+				const vec3 haze = vec3(1.0, 0.96, 0.88) * x0.z;   // (the light's colour: a warm white)
+				c = pack_rgb(rgb_of(c) * th + haze * sc);
+			}
+		}
+		res = 0x80000000u | (c & 0xffffffu);
+	}
+	// the game's shadow polygons over it (when drawn)
+	if ((FLAGS & F_GAME_SHADOWS) != 0u) {
+		const uint m = MOIRE[i];
+		if ((FLAGS & F_BLEND) != 0u) {
+			if (m != 0xffffffffu) {
+				const uint half_ = (QUADS[quad_of_tri(m) * 8u] >> 1) & 0x7f7f7fu;
+				if (res != 0u) res = 0x80000000u | k0.z | (((res >> 1) & 0x7f7f7fu) + half_);
+				else {
+					// (nothing of this view under it: over an earlier view's pixel, or the CPU's picture)
+					const uint prev = OUT[i];
+					if ((prev & 0x80000000u) != 0u) { if ((prev & k0.z) == 0u) res = 0x80000000u | k0.z | (((prev >> 1) & 0x7f7f7fu) + half_); }
+					else res = 0x40000000u | half_;
+				}
+			}
+		} else if (m != 0u)
+			res = 0x80000000u | (QUADS[quad_of_tri(m - 1u) * 8u] & 0xffffffu);
+	}
+	// the haze over the sky (the CPU's picture there): what it lets through and adds, 12 bits each
+	if (res == 0u && (FLAGS & F_FOG) != 0u && OUT[i] == 0u) {
+		float sc, th;
+		if (fog_at(x, y, -1.0, sc, th))
+			res = 0x20000000u | (uint(clamp(th, 0.0, 1.0) * 4095.0 + 0.5) << 12) | uint(clamp(sc * 0.25, 0.0, 1.0) * 4095.0 + 0.5);
+	}
+	if (res != 0u) OUT[i] = res;
+}
+#endif
